@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# CI 只读跑测试，给最小权限；新增 job 自动继承（release.yml 另行声明 contents: write）。
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          # rustfmt / clippy 只在 macOS 的 Format、Clippy 两步用到
+          components: ${{ runner.os == 'macOS' && 'rustfmt, clippy' || '' }}
+          # 该 action 默认注入 RUSTFLAGS=-D warnings，会让 build/test 也把警告当错误；
+          # warnings-as-errors 交给显式的 Clippy 步骤承担
+          rustflags: ""
+
+      # gpui on Linux needs Wayland / X11 / xkbcommon / fontconfig headers and a Vulkan loader
+      # (same list as gpui-component's script/install-linux.sh, minus webkit which we do not use)
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ clang libfontconfig-dev libwayland-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev \
+            libvulkan1 vulkan-validationlayers
+
+      - name: Format
+        if: runner.os == 'macOS'
+        run: cargo fmt --all -- --check
+
+      # 发布用的打包脚本只在打 tag 时真正运行；这里先把语法错误挡在 PR 阶段
+      - name: Shell scripts
+        if: runner.os == 'Linux'
+        run: |
+          bash -n scripts/*.sh scripts/ci/*.sh
+          shellcheck -S warning scripts/*.sh scripts/ci/*.sh
+          python3 -m py_compile scripts/*.py
+
+      # 同上，但 PowerShell 与 WiX 只有 Windows runner 上齐全。
+      # MSI 用占位 payload 编译：要验的是 .wxs 语法、util 扩展可用、.ico 是合法图标，
+      # 这些都与 payload 内容无关，没必要为此等一次 release 构建。
+      - name: Windows packaging
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'scripts/package-windows.ps1'), [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Host $_ }; throw 'package-windows.ps1 有语法错误' }
+
+          dotnet tool install --global wix --version 6.*
+          if ($LASTEXITCODE -ne 0) { throw "wix 安装失败（exit $LASTEXITCODE）" }
+          wix extension add -g WixToolset.Util.wixext/6.0.0
+          if ($LASTEXITCODE -ne 0) { throw "wix 扩展安装失败（exit $LASTEXITCODE）" }
+
+          $payload = Join-Path $env:RUNNER_TEMP 'msi-payload'
+          New-Item -ItemType Directory -Force -Path $payload | Out-Null
+          foreach ($name in 'anano.exe', 'LICENSE', 'install-source.txt') {
+            Set-Content -LiteralPath (Join-Path $payload $name) -Value 'placeholder' -NoNewline
+          }
+
+          # 每个参数都先落到变量里再传：PowerShell 在 argument mode 下，裸词中间的 `(`
+          # 会截断 token，`-d IconFile=(Resolve-Path ..)` 会被拆成 `IconFile=` 和一个
+          # 裸路径两个 argv，wix 于是把 .ico 当成第二个源文件（WIX0104）。
+          $icon = (Resolve-Path 'crates/anano-app/resources/windows/anano.ico').Path
+          $msi = Join-Path $env:RUNNER_TEMP 'ci-check.msi'
+
+          wix build `
+            -arch x64 `
+            -ext WixToolset.Util.wixext `
+            -d Version=0.0.0 `
+            -d PayloadDir=$payload `
+            -d IconFile=$icon `
+            -o $msi `
+            crates/anano-app/resources/windows/Anano.wxs
+          if ($LASTEXITCODE -ne 0) { throw "wix build 失败（exit $LASTEXITCODE）" }
+
+      - name: Clippy
+        if: runner.os == 'macOS'
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+  licenses:
+    name: Licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 依赖许可证门禁：拦截混入依赖图的 copyleft 许可证。
+      # 规则与已知例外见仓库根目录的 deny.toml。
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses

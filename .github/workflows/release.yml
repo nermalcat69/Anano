@@ -1,0 +1,464 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+# 发布流水线总览：
+#   verify-version ─ create-draft ─┬─ build-macos (arm64 / x64 矩阵)   ─┐
+#                                  ├─ build-linux (x64 / arm64 矩阵)   ─┼─ sign ─ publish ─ mirror-to-oss
+#                                  └─ build-windows (x64 / arm64 矩阵) ─┘
+#
+# 构建 job 与 sign job 绑定 GitHub 环境 `prod`，secrets 在 Settings > Environments > prod 里配置：
+#   APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY   （macOS 签名，p12 base64）
+#   APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID                                 （macOS 公证，app-specific password）
+#   MINISIGN_SECRET_KEY                                                       （更新包签名；`minisign -G -W` 生成的无密码私钥文件全文）
+#   OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET                                 （阿里云 OSS 镜像上传，mirror-to-oss job）
+#
+# 资产命名固定为 Anano-<os>-<arch>.<ext>（不带版本号，版本以 tag 为准），应用内更新器
+# （crates/anano-app/src/state/update.rs 的 asset_pattern）按 "<os>-<arch>.<ext>" 子串选资产，改名时两边同步。
+# 只有 sign job 能上传 SHA256SUMS 与 *.minisig；release 资产一律由本流水线产生，不要手动上传或改名。
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  RELEASE_TAG: ${{ github.ref_name }}
+
+jobs:
+  # 版本号单一来源是根 Cargo.toml 的 [workspace.package].version（两个 crate 都 version.workspace = true，
+  # 二进制里的 CARGO_PKG_VERSION 与 Info.plist 都从它来）。tag 与它不一致就拦死，免得发出
+  # "文件名声称 0.2.0、装上去还是 0.1.0" 的包。
+  verify-version:
+    name: Verify version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare the tag against Cargo.toml
+        shell: bash
+        run: |
+          set -euo pipefail
+          want="${GITHUB_REF_NAME#v}"
+          # 根 Cargo.toml 里第一个顶格的 version = "…" 就是 [workspace.package] 的版本
+          have=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$want" != "$have" ]; then
+            echo "::error::tag 是 v${want}，但 Cargo.toml [workspace.package].version 是 ${have}。改 Cargo.toml、提交后重新打 tag。"
+            exit 1
+          fi
+          echo "版本一致：$want"
+
+      # Cargo.lock 里工作区成员的版本必须跟着 Cargo.toml 一起 bump，否则四个构建 job 的
+      # cargo build --locked 会在编译两分钟后才报 "cannot update the lock file"，
+      # 真正的原因埋在日志里很难看出来。在这里 4 秒内拦下，并直接给出修复命令。
+      - name: Compare Cargo.lock against Cargo.toml
+        shell: bash
+        run: |
+          set -euo pipefail
+          want="${GITHUB_REF_NAME#v}"
+          bad=0
+          for crate in anano-core anano-app; do
+            # lock 的 [[package]] 块里 version 紧跟在 name 后一行；找不到就留空走下面的报错分支
+            have=$(grep -A1 -Fx "name = \"$crate\"" Cargo.lock \
+                   | sed -n 's/^version = "\(.*\)"/\1/p' || true)
+            if [ "$have" != "$want" ]; then
+              echo "::error::Cargo.lock 里 $crate 是 ${have:-<缺失>}，但应该是 ${want}。跑 cargo update --workspace 同步 Cargo.lock 后一起提交。"
+              bad=1
+            fi
+          done
+          [ "$bad" -eq 0 ] || exit 1
+          echo "Cargo.lock 与 Cargo.toml 版本一致：$want"
+
+  # 单独建一次草稿：四个构建 job 并行往同一 tag 上传，让它们各自"没有就创建"会出现
+  # 两个 job 同时发现"没有"然后各建一份草稿（GitHub 草稿不按 tag 去重）。
+  create-draft:
+    name: Create draft release
+    needs: [verify-version]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Create draft if missing
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "release $RELEASE_TAG 已存在，跳过创建"
+          else
+            gh release create "$RELEASE_TAG" --draft --generate-notes --title "$RELEASE_TAG"
+            echo "已创建草稿 release $RELEASE_TAG"
+          fi
+
+  # macos-latest 是 Apple Silicon runner；x86_64 靠 rustup 交叉目标编译（Xcode 的 clang 能出两种架构）。
+  build-macos:
+    name: Build macOS ${{ matrix.label }}
+    needs: [verify-version, create-draft]
+    runs-on: macos-latest
+    environment: prod
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: arm64
+            target: aarch64-apple-darwin
+          - label: x64
+            target: x86_64-apple-darwin
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-${{ matrix.label }}
+
+      - name: Verify signing & notarization secrets are present
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=0
+          for var in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                     APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!var:-}" ]; then
+              echo "::error::$var secret 为空 — 签名 / 公证会失败。到 Settings > Environments > prod 配置。"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          echo "6 个签名 / 公证 secrets 齐全。"
+
+      - name: Import signing certificate
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: scripts/ci/macos-keychain.sh import
+
+      - name: Build, sign & notarize
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCH_LABEL: ${{ matrix.label }}
+          NOTARIZE: '1'
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: scripts/bundle-macos.sh
+
+      - name: Remove signing keychain
+        if: always()
+        shell: bash
+        run: scripts/ci/macos-keychain.sh cleanup
+
+      - name: Inspect bundle (diagnostic)
+        if: always()
+        shell: bash
+        run: |
+          ls -la dist || true
+          codesign -dv --verbose=4 "dist/${{ matrix.label }}/Anano.app" 2>&1 || true
+
+      - name: Upload to draft release
+        shell: bash
+        run: gh release upload "$RELEASE_TAG" "dist/Anano-macos-${{ matrix.label }}.dmg" --clobber
+
+  # 选 22.04 而非 24.04：二进制只能向上兼容 glibc，构建机越老、能跑的发行版越多（22.04 = glibc 2.35）。
+  # arm64 用 GitHub 原生 ARM runner（public 仓库免费）原生编译，不做交叉编译——
+  # gpui 的系统依赖（Wayland / X11 / Vulkan）交叉起来太折腾。
+  build-linux:
+    name: Build Linux ${{ matrix.label }}
+    needs: [verify-version, create-draft]
+    runs-on: ${{ matrix.runner }}
+    environment: prod
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: x64
+            runner: ubuntu-22.04
+          - label: arm64
+            runner: ubuntu-22.04-arm
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-${{ matrix.label }}
+
+      # 与 ci.yml 相同：gpui 需要 Wayland / X11 / xkbcommon / fontconfig 头文件和 Vulkan loader
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ clang libfontconfig-dev libwayland-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev \
+            libvulkan1 vulkan-validationlayers
+
+      - name: Build & package
+        shell: bash
+        env:
+          ARCH_LABEL: ${{ matrix.label }}
+        run: scripts/package-linux.sh
+
+      - name: Upload to draft release
+        shell: bash
+        run: gh release upload "$RELEASE_TAG" "dist/Anano-linux-${{ matrix.label }}.tar.gz" --clobber
+
+  # arm64 用 windows-11-arm runner（目前仅 public 仓库可用）原生编译出 aarch64-pc-windows-msvc
+  build-windows:
+    name: Build Windows ${{ matrix.label }}
+    needs: [verify-version, create-draft]
+    runs-on: ${{ matrix.runner }}
+    environment: prod
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: x64
+            runner: windows-latest
+          - label: arm64
+            runner: windows-11-arm
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-${{ matrix.label }}
+
+      # WiX v4+ 是跨平台的 .NET 全局工具，不依赖 runner 预装的 WiX v3
+      - name: Install WiX
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 6.*
+          if ($LASTEXITCODE -ne 0) { throw "wix 安装失败（exit $LASTEXITCODE）" }
+          wix extension add -g WixToolset.Util.wixext/6.0.0
+          if ($LASTEXITCODE -ne 0) { throw "wix 扩展安装失败（exit $LASTEXITCODE）" }
+
+      - name: Build & package
+        shell: pwsh
+        env:
+          ARCH_LABEL: ${{ matrix.label }}
+        run: scripts/package-windows.ps1
+
+      # 免安装 exe 与 per-user MSI 一起发：装了 MSI 的用户靠安装目录里的 install-source.txt
+      # 被识别出来，自动更新会挑 .msi 而不是裸 exe（crates/anano-app/src/state/update.rs）
+      - name: Upload to draft release
+        shell: pwsh
+        run: gh release upload "$env:RELEASE_TAG" "dist/Anano-windows-${{ matrix.label }}.exe" "dist/Anano-windows-${{ matrix.label }}.msi" --clobber
+
+  # 校验和与 minisign 签名集中在这里做：签名私钥只出现在这一个 job 里。
+  # 应用内更新器用 Verification::Strict，任一平台缺 .minisig 或 SHA256SUMS 里缺它那一行，
+  # 那个平台的用户就会看到"更新失败"——所以八个资产缺一都不放行。
+  # Windows 每种架构有两份（免安装 exe + per-user MSI），装 MSI 的用户更新时拿的是 .msi。
+  sign:
+    name: Checksums & signatures
+    needs: [build-macos, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    environment: prod
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install minisign
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          minisign -v
+
+      - name: Download release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release download "$RELEASE_TAG" --dir assets --pattern 'Anano-*'
+          ls -la assets
+          for f in Anano-macos-arm64.dmg Anano-macos-x64.dmg \
+                   Anano-linux-x64.tar.gz Anano-linux-arm64.tar.gz \
+                   Anano-windows-x64.exe Anano-windows-x64.msi \
+                   Anano-windows-arm64.exe Anano-windows-arm64.msi; do
+            [ -f "assets/$f" ] || { echo "::error::缺少资产 $f"; exit 1; }
+          done
+
+      - name: Generate SHA256SUMS and minisign signatures
+        shell: bash
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::error::MINISIGN_SECRET_KEY secret 为空。到 Settings > Environments > prod 配置。"
+            exit 1
+          fi
+          key="$RUNNER_TEMP/minisign.key"
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key"
+
+          cd assets
+          assets=(Anano-macos-arm64.dmg Anano-macos-x64.dmg
+                  Anano-linux-x64.tar.gz Anano-linux-arm64.tar.gz
+                  Anano-windows-x64.exe Anano-windows-x64.msi
+                  Anano-windows-arm64.exe Anano-windows-arm64.msi)
+          # 两个空格分隔的 "<hex>  <name>"，与更新器的解析（按空白切分、取 basename）兼容
+          sha256sum "${assets[@]}" > SHA256SUMS
+          for f in "${assets[@]}" SHA256SUMS; do
+            minisign -S -s "$key" -m "$f" -t "Anano $RELEASE_TAG $f"
+          done
+          rm -f "$key"
+
+          # 自检：用仓库里的公钥验签、回读校验和；失败就不上传
+          for f in "${assets[@]}" SHA256SUMS; do
+            minisign -V -p "$GITHUB_WORKSPACE/minisign.pub" -m "$f"
+          done
+          sha256sum -c SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload checksums and signatures
+        shell: bash
+        run: gh release upload "$RELEASE_TAG" assets/SHA256SUMS assets/*.minisig --clobber
+
+  # 草稿翻正式是最后一步：所有产物 + 校验和 + 签名都传完之前 release 一直是草稿，外部看不到半成品。
+  # tag 含 "-"（如 v0.1.1-rc.1）发成 prerelease 且不 make_latest：GitHub 的 releases/latest 会跳过它，
+  # 正式用户的更新器看不到，可用于演练；开发者用 GETCAT_UPDATE_PRERELEASE=1 启动才能收到。
+  publish:
+    name: Publish release
+    needs: [sign]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Flip draft to published
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        with:
+          script: |
+            const tag = process.env.RELEASE_TAG;
+            const prerelease = tag.includes('-');
+            const { data: releases } = await github.rest.repos.listReleases({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const release = releases.find(r => r.tag_name === tag);
+            if (!release) {
+              throw new Error(`Release for tag ${tag} not found`);
+            }
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: release.id,
+              draft: false,
+              prerelease,
+              make_latest: prerelease ? 'false' : 'true',
+            });
+            core.info(`Published ${prerelease ? 'pre-' : ''}release ${tag} (id=${release.id})`);
+
+  # 镜像到阿里云 OSS——应用内更新器的「中国大陆」源（crates/anano-app/src/state/update.rs
+  # 的 MIRROR_MANIFEST_URL）。把已发布 release 的全部资产原样搬到 oss://pidan-github-mirror/Anano/
+  # （扁平覆盖布局：文件名不带版本号，每次发版原地覆盖，桶里只保留最新版），并生成
+  # StaticManifestSource 读的 latest.json（scripts/ci/gen-oss-manifest.py，含 sha256 回验自检）。
+  # 两条约定：
+  #   - latest.json 必须最后上传——正在检查更新的客户端不能拿到指向还没传完的文件的 manifest；
+  #   - prerelease（tag 含 "-"）整个跳过，镜像上永远只有正式版。
+  # 镜像失败不影响已发布的 GitHub release，但要修：latest.json 停在旧版，大陆用户收不到更新。
+  mirror-to-oss:
+    name: Mirror to Aliyun OSS
+    needs: [publish]
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    environment: prod
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      # ossutil v2 直接从这两个环境变量读凭证，不需要 -i / -k
+      OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+      OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+      OSS_ENDPOINT: oss-cn-shanghai.aliyuncs.com
+      OSS_REGION: cn-shanghai
+      OSS_DEST: oss://pidan-github-mirror/Anano
+      # 桶绑定的自定义域名；latest.json 里的下载链接以它开头，改域名要连
+      # crates/anano-app/src/state/update.rs 的 MIRROR_MANIFEST_URL 一起改。
+      MIRROR_BASE: https://d.mirror.catonthe.top/Anano
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify OSS secrets are present
+        shell: bash
+        run: |
+          missing=0
+          for var in OSS_ACCESS_KEY_ID OSS_ACCESS_KEY_SECRET; do
+            if [ -z "${!var:-}" ]; then
+              echo "::error::$var secret 为空 — 无法上传镜像。到 Settings > Environments > prod 配置。"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+      - name: Install ossutil
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="2.2.2"
+          curl -fsSL "https://gosspublic.alicdn.com/ossutil/v2/${version}/ossutil-${version}-linux-amd64.zip" -o /tmp/ossutil.zip
+          unzip -q /tmp/ossutil.zip -d /tmp/
+          sudo mv "/tmp/ossutil-${version}-linux-amd64/ossutil" /usr/local/bin/ossutil
+          sudo chmod +x /usr/local/bin/ossutil
+          ossutil version
+
+      - name: Download release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release download "$RELEASE_TAG" --dir assets \
+            --pattern 'Anano-*' --pattern 'SHA256SUMS*'
+          ls -la assets
+
+      # 生成到 assets/ 之外：下面按目录批量传资产，manifest 单独最后传
+      - name: Generate latest.json
+        shell: bash
+        run: |
+          python3 scripts/ci/gen-oss-manifest.py \
+            --tag "$RELEASE_TAG" --assets-dir assets \
+            --base-url "$MIRROR_BASE" --out latest.json
+          cat latest.json
+
+      - name: Upload to OSS (manifest last)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in assets/*; do
+            ossutil cp -f "$f" "$OSS_DEST/$(basename "$f")"
+          done
+          ossutil cp -f latest.json "$OSS_DEST/latest.json"
+          echo "镜像完成：$MIRROR_BASE/latest.json"

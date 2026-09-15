@@ -1,0 +1,5 @@
+//! Anano 核心逻辑：不依赖任何 UI 框架，可独立测试。
+
+pub mod git;
+pub mod model;
+pub mod store;
