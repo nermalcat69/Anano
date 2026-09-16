@@ -76,7 +76,8 @@ pub fn create_branch(repo_path: &Path, name: &str, from: Option<&str>) -> Result
         .revparse_single(target)
         .and_then(|obj| obj.peel_to_commit())
         .map_err(GitError::Branch)?;
-    repo.branch(name, &commit, false).map_err(GitError::Branch)?;
+    repo.branch(name, &commit, false)
+        .map_err(GitError::Branch)?;
     Ok(())
 }
 
@@ -98,7 +99,8 @@ pub fn checkout_branch(repo_path: &Path, name: &str) -> Result<(), GitError> {
             repo.set_head(branch_ref).map_err(GitError::Branch)?;
         }
         _ => {
-            repo.set_head_detached(object.id()).map_err(GitError::Branch)?;
+            repo.set_head_detached(object.id())
+                .map_err(GitError::Branch)?;
         }
     }
     Ok(())

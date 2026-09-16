@@ -38,11 +38,20 @@ pub fn logo_path(cx: &App) -> &'static str {
 
 /// 图标栏「打开仓库」按钮的图标。
 pub const ICON_FOLDER_GIT: &str = "icons/folder-git.svg";
-/// 备用：分支相关 UI（后续阶段）会用到，Phase 1 暂未引用，先补进资源表免得重复劳动。
+/// 分支区：当前分支名旁边的图标。
 pub const ICON_GIT_BRANCH: &str = "icons/git-branch.svg";
+/// 同步工具栏：fetch / pull / push，分别对应下载、云下载、云上传。
+pub const ICON_DOWNLOAD: &str = "icons/download.svg";
+pub const ICON_DOWNLOAD_CLOUD: &str = "icons/download-cloud.svg";
+pub const ICON_UPLOAD_CLOUD: &str = "icons/upload-cloud.svg";
+/// 分支下拉菜单里的「删除分支」项。
+pub const ICON_TRASH: &str = "icons/trash-2.svg";
+/// 侧栏「History」标签页的图标；默认图标集里没有钟表图形。
+pub const ICON_HISTORY: &str = "icons/history.svg";
 
-/// 应用自带的资源表。上游 `gpui-component-assets` 没有「文件夹 + git」「分支」这两个
-/// 图形，补在这里；取自 Feather Icons（MIT），与上游图标集同为 24px 描边风格。
+/// 应用自带的资源表：上游 `gpui-component-assets` 只嵌入了一小份「默认」图标
+/// （见其 `default-icons.txt`），这里用到的 git/同步相关图形大多不在其中，
+/// 补在这里；取自 Feather Icons（MIT），与上游图标集同为 24px 描边风格。
 const ASSETS: &[(&str, &[u8])] = &[
     (LOGO_PATH, LOGO_PNG),
     (LOGO_LIGHT_PATH, include_bytes!("../assets/logo/logo.svg")),
@@ -58,6 +67,20 @@ const ASSETS: &[(&str, &[u8])] = &[
         ICON_GIT_BRANCH,
         include_bytes!("../assets/icons/git-branch.svg"),
     ),
+    (
+        ICON_DOWNLOAD,
+        include_bytes!("../assets/icons/download.svg"),
+    ),
+    (
+        ICON_DOWNLOAD_CLOUD,
+        include_bytes!("../assets/icons/download-cloud.svg"),
+    ),
+    (
+        ICON_UPLOAD_CLOUD,
+        include_bytes!("../assets/icons/upload-cloud.svg"),
+    ),
+    (ICON_TRASH, include_bytes!("../assets/icons/trash-2.svg")),
+    (ICON_HISTORY, include_bytes!("../assets/icons/history.svg")),
 ];
 
 pub struct AppAssets;
@@ -128,7 +151,15 @@ mod tests {
     /// 补的图标要真的能取到，而且是 gpui 的 `svg()` 认得的 SVG。
     #[test]
     fn app_icons_are_served_as_svg() {
-        for path in [ICON_FOLDER_GIT, ICON_GIT_BRANCH] {
+        for path in [
+            ICON_FOLDER_GIT,
+            ICON_GIT_BRANCH,
+            ICON_DOWNLOAD,
+            ICON_DOWNLOAD_CLOUD,
+            ICON_UPLOAD_CLOUD,
+            ICON_TRASH,
+            ICON_HISTORY,
+        ] {
             let bytes = AppAssets
                 .load(path)
                 .unwrap()

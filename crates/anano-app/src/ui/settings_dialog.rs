@@ -216,6 +216,19 @@ fn general_page(workspace: WeakEntity<Workspace>) -> SettingPage {
                     )
                     .description(tr!("settings.editor_font_size_desc")),
                 ),
+        )
+        .group(
+            SettingGroup::new().title(tr!("settings.git")).item(
+                SettingItem::new(
+                    tr!("settings.push_on_commit"),
+                    SettingField::switch(
+                        |cx| settings::settings(cx).push_on_commit,
+                        |value, cx| settings::update(cx, |s| s.push_on_commit = value),
+                    )
+                    .default_value(false),
+                )
+                .description(tr!("settings.push_on_commit_desc")),
+            ),
         );
     #[cfg(target_os = "linux")]
     let page = page.group(linux_system_group());

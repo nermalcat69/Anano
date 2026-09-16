@@ -19,7 +19,8 @@ fn open(path: &Path) -> Result<git2::Repository, GitError> {
     git2::Repository::discover(path).map_err(GitError::Open)
 }
 
-fn auth_callbacks() -> RemoteCallbacks<'static> {
+/// 建立在 `pub(crate)` 上：`clone.rs` 里的克隆也要用同一套认证回调，不重复实现。
+pub(crate) fn auth_callbacks() -> RemoteCallbacks<'static> {
     let mut cb = RemoteCallbacks::new();
     cb.credentials(|url, username_from_url, allowed| {
         if allowed.contains(CredentialType::SSH_KEY)
@@ -244,15 +245,16 @@ mod tests {
         run(&["config", "user.name", "test"], other_dir.path());
         fs::write(other_dir.path().join("c.txt"), "from elsewhere").unwrap();
         run(&["add", "."], other_dir.path());
-        run(&["commit", "-q", "-m", "from other clone"], other_dir.path());
+        run(
+            &["commit", "-q", "-m", "from other clone"],
+            other_dir.path(),
+        );
         run(&["push", "-q"], other_dir.path());
 
         fetch(local_dir.path(), "origin").unwrap();
 
         let repo = git2::Repository::open(local_dir.path()).unwrap();
-        let tracking = repo
-            .find_branch("origin/main", BranchType::Remote)
-            .unwrap();
+        let tracking = repo.find_branch("origin/main", BranchType::Remote).unwrap();
         let commit = tracking.get().peel_to_commit().unwrap();
         assert_eq!(commit.summary(), Some("from other clone"));
     }
@@ -285,7 +287,10 @@ mod tests {
         run(&["config", "user.name", "test"], other_dir.path());
         fs::write(other_dir.path().join("c.txt"), "from elsewhere").unwrap();
         run(&["add", "."], other_dir.path());
-        run(&["commit", "-q", "-m", "from other clone"], other_dir.path());
+        run(
+            &["commit", "-q", "-m", "from other clone"],
+            other_dir.path(),
+        );
         run(&["push", "-q"], other_dir.path());
 
         pull(local_dir.path(), "origin").unwrap();

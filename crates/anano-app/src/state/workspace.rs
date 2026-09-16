@@ -9,11 +9,11 @@
 // gpui 重导出的 `#[proc_macro_attribute] test`，与标准库 `#[test]` 同名冲突。
 use std::path::PathBuf;
 
-use anano_core::git::{GitError, LfsOp, RepoEntry};
+use anano_core::git::{ChangeKind, GitError, LfsOp, RepoEntry};
 use anano_core::model::{ThemePref, Ulid, WorkspaceState};
 use anano_core::store::Loaded;
 use gpui_kit::component::{
-    ActiveTheme, IconName, Sizable, Theme, ThemeMode, TitleBar,
+    ActiveTheme, IconName, Sizable, Theme, ThemeMode, TitleBar, WindowExt,
     alert::Alert,
     button::{Button, ButtonVariants},
     h_flex,
@@ -24,8 +24,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext, Context, Entity, FocusHandle, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, PathPromptOptions, Render, Role, ScrollHandle, SharedString,
+    App, AppContext, ClipboardItem, Context, Entity, FocusHandle, FontWeight, InteractiveElement,
+    IntoElement, ParentElement, PathPromptOptions, Render, Role, ScrollHandle, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Window, div, px,
 };
 
@@ -35,6 +35,7 @@ use crate::brand::APP_NAME;
 use crate::bridge;
 use crate::i18n::tr;
 use crate::state::repos::{OpenRepo, SyncKind};
+use crate::state::settings;
 use crate::state::store::{banner, store};
 use crate::state::update;
 use crate::ui::settings_dialog::{SettingsPage, open_settings, open_settings_page};
@@ -47,6 +48,15 @@ pub(crate) const SIDEBAR_MIN_WIDTH: f32 = 260.;
 pub(crate) const SIDEBAR_MAX_WIDTH: f32 = 600.;
 /// 历史列表拉多少条；够看最近在干嘛，不做分页/加载更多（那是后续阶段的事）。
 const RECENT_COMMITS_LIMIT: usize = 30;
+
+/// 侧栏下半部分的两个标签：改动 / 历史。GitHub Desktop 同款布局——分支与同步是
+/// 常驻的上下文，标签只切换「改了什么」和「都提交过什么」这两块内容。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SidebarTab {
+    #[default]
+    Changes,
+    History,
+}
 
 pub struct Workspace {
     repos: Vec<OpenRepo>,
@@ -66,6 +76,10 @@ pub struct Workspace {
     /// 复用同一个 `InputState`（不是每次展开都新建，输入法组合状态不会被打断）。
     pub(crate) new_branch_input: Entity<InputState>,
     pub(crate) new_branch_open: bool,
+    /// 侧栏下半部分当前显示哪个标签（改动 / 历史）。
+    pub(crate) sidebar_tab: SidebarTab,
+    /// 仓库切换器里的过滤输入框。
+    pub(crate) repo_search_input: Entity<InputState>,
     _subs: Vec<Subscription>,
 }
 
@@ -103,6 +117,10 @@ impl Workspace {
                 InputState::new(window, cx).placeholder(tr!("repo.branch.new_placeholder"))
             }),
             new_branch_open: false,
+            sidebar_tab: SidebarTab::default(),
+            repo_search_input: cx.new(|cx| {
+                InputState::new(window, cx).placeholder(tr!("repo.switcher.search_placeholder"))
+            }),
             _subs: Vec::new(),
         };
 
@@ -253,6 +271,294 @@ impl Workspace {
         }
         self.persist_repos(cx);
         cx.notify();
+    }
+
+    pub fn sidebar_tab(&self) -> SidebarTab {
+        self.sidebar_tab
+    }
+
+    pub fn set_sidebar_tab(&mut self, tab: SidebarTab, cx: &mut Context<Self>) {
+        self.sidebar_tab = tab;
+        cx.notify();
+    }
+
+    /// `Popover` 自己管开关状态（见 `ui::sidebar::render_repo_switcher`），这里不用再
+    /// 跟踪一份；切一个仓库或打开某个「Add」子对话框之后，`Popover` 在下一次点击外部
+    /// 时自然收起。
+    fn close_repo_switcher(&mut self, _cx: &mut Context<Self>) {}
+
+    /// 切换器里点一个「最近」条目：切过去。
+    pub fn activate_from_switcher(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.activate(ix, cx);
+        self.close_repo_switcher(cx);
+    }
+
+    /// 「Add Repository」→「Add Existing Repository…」：跟图标栏「打开仓库」共用同一个
+    /// 文件夹选择器 + `discover_root` 流程，先收起下拉。
+    pub fn add_existing_repo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_repo_switcher(cx);
+        self.open_repo_dialog(window, cx);
+    }
+
+    /// 「Add Repository」→「Clone Repository…」：URL 输入框 + 一个「Clone」按钮，
+    /// 点击后弹原生文件夹选择器挑父目录，仓库名从 URL 最后一段推断
+    /// （去掉常见的 `.git` 后缀）。克隆本身跑在后台线程（`bridge::clone`），
+    /// 认证复用 `anano_core::git::remote::auth_callbacks`（SSH agent / HTTPS credential
+    /// helper），不接 GitHub OAuth——跟这次任务的范围决定一致。
+    pub fn open_clone_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_repo_switcher(cx);
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let url_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("repo.clone.url_placeholder")));
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let url_input = url_input.clone();
+            let workspace = workspace.clone();
+            let url_input_for_content = url_input.clone();
+            dialog
+                .title(tr!("repo.clone.title"))
+                .w(px(420.))
+                .content(move |content, _, _| {
+                    content.child(div().rounded(px(6.)).border_1().child(
+                        gpui_kit::component::input::Input::new(&url_input_for_content),
+                    ))
+                })
+                .footer(
+                    gpui_kit::component::dialog::DialogFooter::new().child(
+                        Button::new("clone-confirm")
+                            .primary()
+                            .label(tr!("repo.clone.action"))
+                            .on_click({
+                                let url_input = url_input.clone();
+                                let workspace = workspace.clone();
+                                move |_, window, cx| {
+                                    let url = url_input.read(cx).value().trim().to_string();
+                                    window.close_dialog(cx);
+                                    if url.is_empty() {
+                                        return;
+                                    }
+                                    workspace.update(cx, |ws, cx| {
+                                        ws.pick_clone_destination(url, window, cx)
+                                    });
+                                }
+                            }),
+                    ),
+                )
+        });
+    }
+
+    fn pick_clone_destination(
+        &mut self,
+        url: String,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(tr!("repo.clone.destination")),
+        });
+        cx.spawn(async move |ws, cx| {
+            let Ok(Ok(Some(mut paths))) = receiver.await else {
+                return;
+            };
+            let Some(parent) = paths.pop() else { return };
+            let _ = ws.update(cx, |ws, cx| ws.clone_into(url, parent, cx));
+        })
+        .detach();
+    }
+
+    fn clone_into(&mut self, url: String, parent: PathBuf, cx: &mut Context<Self>) {
+        let name = repo_name_from_url(&url);
+        let dest = parent.join(name);
+        let task = bridge::clone(cx, url, dest.clone());
+        cx.spawn(async move |ws, cx| {
+            let result = task.await;
+            let _ = ws.update(cx, |ws, cx| match result {
+                Ok(Ok(path)) => ws.open_repo_path(path, cx),
+                Ok(Err(err)) => {
+                    ws.notify_add_repo_error(tr!("repo.clone.error", error = err.to_string()), cx)
+                }
+                Err(err) => {
+                    ws.notify_add_repo_error(tr!("repo.clone.error", error = err.to_string()), cx)
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 「Add Repository」→「Create New Repository…」：名字输入框 + 一个「Create」按钮，
+    /// 点击后弹文件夹选择器挑父目录，在 `<parent>/<name>` 跑 `git2::Repository::init`。
+    pub fn open_create_repo_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_repo_switcher(cx);
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let name_input = cx
+            .new(|cx| InputState::new(window, cx).placeholder(tr!("repo.create.name_placeholder")));
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let name_input = name_input.clone();
+            let workspace = workspace.clone();
+            let name_input_for_content = name_input.clone();
+            dialog
+                .title(tr!("repo.create.title"))
+                .w(px(420.))
+                .content(move |content, _, _| {
+                    content.child(div().rounded(px(6.)).border_1().child(
+                        gpui_kit::component::input::Input::new(&name_input_for_content),
+                    ))
+                })
+                .footer(
+                    gpui_kit::component::dialog::DialogFooter::new().child(
+                        Button::new("create-repo-confirm")
+                            .primary()
+                            .label(tr!("repo.create.action"))
+                            .on_click({
+                                let name_input = name_input.clone();
+                                let workspace = workspace.clone();
+                                move |_, window, cx| {
+                                    let name = name_input.read(cx).value().trim().to_string();
+                                    window.close_dialog(cx);
+                                    if name.is_empty() {
+                                        return;
+                                    }
+                                    workspace.update(cx, |ws, cx| {
+                                        ws.pick_create_location(name, window, cx)
+                                    });
+                                }
+                            }),
+                    ),
+                )
+        });
+    }
+
+    fn pick_create_location(&mut self, name: String, _window: &mut Window, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(tr!("repo.create.location")),
+        });
+        cx.spawn(async move |ws, cx| {
+            let Ok(Ok(Some(mut paths))) = receiver.await else {
+                return;
+            };
+            let Some(parent) = paths.pop() else { return };
+            let _ = ws.update(cx, |ws, cx| ws.create_repo_into(parent, name, cx));
+        })
+        .detach();
+    }
+
+    fn create_repo_into(&mut self, parent: PathBuf, name: String, cx: &mut Context<Self>) {
+        let task = bridge::init_new_repo(cx, parent, name);
+        cx.spawn(async move |ws, cx| {
+            let result = task.await;
+            let _ = ws.update(cx, |ws, cx| match result {
+                Ok(Ok(path)) => ws.open_repo_path(path, cx),
+                Ok(Err(err)) => {
+                    ws.notify_add_repo_error(tr!("repo.create.error", error = err.to_string()), cx)
+                }
+                Err(err) => {
+                    ws.notify_add_repo_error(tr!("repo.create.error", error = err.to_string()), cx)
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Clone / Create 在打开任何仓库之前就可能失败，没有 `OpenRepo::action_error` 可以
+    /// 挂——用一次性通知代替，跟 sync 那套「挂在仓库上」的错误展示分开也说得通：
+    /// 这压根不是某个已打开仓库的操作。
+    fn notify_add_repo_error(&self, message: SharedString, cx: &mut App) {
+        tracing::warn!("{message}");
+        cx.defer(move |cx| {
+            if let Some(window) = cx.active_window() {
+                let _ = window.update(cx, |_, window, cx| {
+                    window.push_notification(
+                        gpui_kit::component::notification::Notification::error(message),
+                        cx,
+                    );
+                });
+            }
+        });
+    }
+
+    /// 右键菜单「Discard Changes」。
+    pub fn discard_file_change(&mut self, file: String, kind: ChangeKind, cx: &mut Context<Self>) {
+        let Some(repo) = self.active_repo() else {
+            return;
+        };
+        let path = repo.entry.path.clone();
+        let id = repo.entry.id;
+        let task = bridge::discard(cx, path, file, kind);
+        cx.spawn(async move |ws, cx| {
+            let result = task.await;
+            let _ = ws.update(cx, |ws, cx| {
+                if let Some(repo) = ws.repos.iter_mut().find(|r| r.entry.id == id) {
+                    repo.action_error = action_error(result);
+                }
+                ws.refresh_active_status(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// 右键菜单「Ignore File」。
+    pub fn ignore_file(&mut self, file: String, cx: &mut Context<Self>) {
+        let Some(repo) = self.active_repo() else {
+            return;
+        };
+        let path = repo.entry.path.clone();
+        let id = repo.entry.id;
+        let task = bridge::ignore_file(cx, path, file);
+        cx.spawn(async move |ws, cx| {
+            let result = task.await;
+            let _ = ws.update(cx, |ws, cx| {
+                if let Some(repo) = ws.repos.iter_mut().find(|r| r.entry.id == id) {
+                    repo.action_error = action_error(result);
+                }
+                ws.refresh_active_status(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// 右键菜单「Ignore All *.ext Files」。
+    pub fn ignore_file_extension(&mut self, file: String, cx: &mut Context<Self>) {
+        let Some(repo) = self.active_repo() else {
+            return;
+        };
+        let path = repo.entry.path.clone();
+        let id = repo.entry.id;
+        let task = bridge::ignore_file_extension(cx, path, file);
+        cx.spawn(async move |ws, cx| {
+            let result = task.await;
+            let _ = ws.update(cx, |ws, cx| {
+                if let Some(repo) = ws.repos.iter_mut().find(|r| r.entry.id == id) {
+                    repo.action_error = action_error(result);
+                }
+                ws.refresh_active_status(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// 右键菜单「Copy File Path」：绝对路径。
+    pub fn copy_file_path(&self, file: &str, cx: &mut App) {
+        let Some(repo) = self.active_repo() else {
+            return;
+        };
+        let abs = repo.entry.path.join(file);
+        cx.write_to_clipboard(ClipboardItem::new_string(abs.display().to_string()));
+    }
+
+    /// 右键菜单「Copy Relative File Path」：仓库相对路径，就是 `FileStatus.path` 本身。
+    pub fn copy_relative_file_path(&self, file: &str, cx: &mut App) {
+        cx.write_to_clipboard(ClipboardItem::new_string(file.to_string()));
     }
 
     /// 重新读一次当前激活仓库的 `git status`（后台线程，见 `bridge::refresh_status`）。
@@ -568,6 +874,7 @@ impl Workspace {
                 return;
             };
             let result = commit_task.await;
+            let committed = matches!(result, Ok(Ok(_)));
             let _ = ws.update(cx, |ws, cx| {
                 match result {
                     Ok(Ok(_id)) => {}
@@ -576,6 +883,12 @@ impl Workspace {
                 }
                 ws.refresh_active_status(cx);
                 ws.refresh_active_log(cx);
+                // 「提交后自动 push」：只在 commit 真正成功时才追加，失败/无改动都不该
+                // 触发一次多余的网络往返。push 失败沿用它自己已有的 `action_error`
+                // 展示路径（`run_sync`），这里不用再单独处理一遍。
+                if committed && settings::settings(cx).push_on_commit {
+                    ws.push(cx);
+                }
             });
         })
         .detach();
@@ -605,6 +918,10 @@ impl Workspace {
             let list = self.repos.iter().map(|r| r.entry.clone()).collect();
             store.write_repo_list(list);
         }
+    }
+
+    pub fn sidebar_collapsed(&self) -> bool {
+        self.sidebar_collapsed
     }
 
     pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -760,6 +1077,23 @@ fn action_error<T>(result: anyhow::Result<Result<T, GitError>>) -> Option<String
     }
 }
 
+/// 从 git URL 推断仓库名：取最后一段，去掉常见的 `.git` 后缀与末尾斜杠。
+/// 推不出来（比如空字符串）就退回一个占位名，`init`/`clone` 到磁盘上的目录名
+/// 总得是个合法路径分量。
+fn repo_name_from_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    let last = trimmed
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or(trimmed)
+        .trim_end_matches(".git");
+    if last.is_empty() {
+        "repository".to_string()
+    } else {
+        last.to_string()
+    }
+}
+
 /// 按 `order` 排列仓库：顺序里没有的 id 跳过；没被提到的仓库按原顺序追加在末尾。
 fn reorder(repos: &mut Vec<OpenRepo>, order: &[Ulid]) {
     let mut ordered = Vec::with_capacity(repos.len());
@@ -869,6 +1203,17 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_name_from_url_strips_dot_git_and_trailing_slash() {
+        assert_eq!(
+            repo_name_from_url("https://github.com/user/anano.git"),
+            "anano"
+        );
+        assert_eq!(repo_name_from_url("git@github.com:user/anano.git"), "anano");
+        assert_eq!(repo_name_from_url("https://example.com/repo/"), "repo");
+        assert_eq!(repo_name_from_url(""), "repository");
+    }
 
     #[test]
     fn reorder_follows_the_given_order_and_appends_unlisted_by_position() {

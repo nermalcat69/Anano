@@ -3,12 +3,13 @@
 
 use std::path::PathBuf;
 
+use anano_core::git::lfs::sync as lfs_sync;
 use anano_core::git::{
-    Branch, CommitInfo, FileStatus, GitError, LfsOp, LfsSync, checkout_branch, commit_staged,
-    create_branch, delete_branch, discover_root, fetch, list_branches, pull, push, recent_commits,
+    Branch, ChangeKind, CommitInfo, FileStatus, GitError, LfsOp, LfsSync, checkout_branch,
+    clone_repo, commit_staged, create_branch, delete_branch, discard_change, discover_root, fetch,
+    ignore_extension, ignore_path, init_repo, list_branches, pull, push, recent_commits,
     repo_status, stage_all, stage_path, unstage_path,
 };
-use anano_core::git::lfs::sync as lfs_sync;
 use gpui_kit::{App, Task};
 use gpui_tokio::Tokio;
 
@@ -147,6 +148,62 @@ pub fn push_remote(
 ) -> Task<anyhow::Result<Result<(), GitError>>> {
     Tokio::spawn_result(cx, async move {
         Ok(tokio::task::spawn_blocking(move || push(&repo, DEFAULT_REMOTE, &branch_name)).await?)
+    })
+}
+
+/// `git clone <url> <parent>/<name>`（Add Repository → Clone Repository）。
+pub fn clone(
+    cx: &App,
+    url: String,
+    dest: PathBuf,
+) -> Task<anyhow::Result<Result<PathBuf, GitError>>> {
+    Tokio::spawn_result(cx, async move {
+        Ok(tokio::task::spawn_blocking(move || clone_repo(&url, &dest)).await?)
+    })
+}
+
+/// `git init`（Add Repository → Create New Repository）。
+pub fn init_new_repo(
+    cx: &App,
+    parent: PathBuf,
+    name: String,
+) -> Task<anyhow::Result<Result<PathBuf, GitError>>> {
+    Tokio::spawn_result(cx, async move {
+        Ok(tokio::task::spawn_blocking(move || init_repo(&parent, &name)).await?)
+    })
+}
+
+/// 丢弃一个文件的改动（右键菜单「Discard Changes」）。
+pub fn discard(
+    cx: &App,
+    repo: PathBuf,
+    file: String,
+    kind: ChangeKind,
+) -> Task<anyhow::Result<Result<(), GitError>>> {
+    Tokio::spawn_result(cx, async move {
+        Ok(tokio::task::spawn_blocking(move || discard_change(&repo, &file, kind)).await?)
+    })
+}
+
+/// 把一个文件精确路径加进 `.gitignore`（右键菜单「Ignore File」）。
+pub fn ignore_file(
+    cx: &App,
+    repo: PathBuf,
+    file: String,
+) -> Task<anyhow::Result<Result<(), GitError>>> {
+    Tokio::spawn_result(cx, async move {
+        Ok(tokio::task::spawn_blocking(move || ignore_path(&repo, &file)).await?)
+    })
+}
+
+/// 把一个文件的扩展名 glob 加进 `.gitignore`（右键菜单「Ignore All *.ext Files」）。
+pub fn ignore_file_extension(
+    cx: &App,
+    repo: PathBuf,
+    file: String,
+) -> Task<anyhow::Result<Result<(), GitError>>> {
+    Tokio::spawn_result(cx, async move {
+        Ok(tokio::task::spawn_blocking(move || ignore_extension(&repo, &file)).await?)
     })
 }
 

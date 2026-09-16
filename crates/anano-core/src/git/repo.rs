@@ -3,10 +3,11 @@
 
 use std::path::{Path, PathBuf};
 
+use git2::build::CheckoutBuilder;
 use git2::{IndexAddOption, Repository, Sort, StatusOptions};
 
 use crate::git::error::GitError;
-use crate::git::model::{CommitInfo, FileStatus};
+use crate::git::model::{ChangeKind, CommitInfo, FileStatus};
 use crate::git::status::map_status;
 
 /// 从 `path`（可以是仓库内任意子目录）找到仓库工作树的根。`Repository::open` 要求
@@ -136,6 +137,56 @@ pub fn stage_all(repo_path: &Path) -> Result<(), GitError> {
     index.update_all(["*"], None).map_err(GitError::Status)?;
     index.write().map_err(GitError::Status)?;
     Ok(())
+}
+
+/// 丢弃一个文件的改动：新增/未跟踪文件直接从磁盘删掉；其余（修改/删除/重命名/类型变更）
+/// 用 `checkout_head` 强制把工作树那一条路径还原成 `HEAD` 里的版本。调用方（UI）已经从
+/// `FileStatus.kind` 知道是哪一种，这里不用再重新查一遍状态。
+pub fn discard_change(repo_path: &Path, file: &str, kind: ChangeKind) -> Result<(), GitError> {
+    if kind == ChangeKind::New {
+        let abs = repo_path.join(file);
+        if abs.exists() {
+            std::fs::remove_file(&abs).map_err(|e| GitError::Discard(e.to_string()))?;
+        }
+        return Ok(());
+    }
+    let repo = open(repo_path)?;
+    let mut checkout = CheckoutBuilder::new();
+    checkout.force();
+    checkout.path(file);
+    repo.checkout_head(Some(&mut checkout))
+        .map_err(|e| GitError::Discard(e.to_string()))
+}
+
+/// 把一条 `.gitignore` 条目追加进去：文件不存在就新建，已有同样一行就不重复加。
+fn append_gitignore_entry(repo_path: &Path, entry: &str) -> Result<(), GitError> {
+    let gitignore = repo_path.join(".gitignore");
+    let existing = std::fs::read_to_string(&gitignore).unwrap_or_default();
+    if existing.lines().any(|line| line.trim() == entry) {
+        return Ok(());
+    }
+    let mut content = existing;
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(entry);
+    content.push('\n');
+    std::fs::write(&gitignore, content).map_err(|e| GitError::Ignore(e.to_string()))
+}
+
+/// 「Ignore File」：把仓库相对路径原样追加进 `.gitignore`。
+pub fn ignore_path(repo_path: &Path, file: &str) -> Result<(), GitError> {
+    append_gitignore_entry(repo_path, file)
+}
+
+/// 「Ignore All *.ext Files」：按文件扩展名生成一条 glob 规则；没有扩展名就退回精确路径
+/// （没有更好的通配写法，跟 `ignore_path` 行为一致好过报错）。
+pub fn ignore_extension(repo_path: &Path, file: &str) -> Result<(), GitError> {
+    let pattern = match Path::new(file).extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("*.{ext}"),
+        None => return append_gitignore_entry(repo_path, file),
+    };
+    append_gitignore_entry(repo_path, &pattern)
 }
 
 #[cfg(test)]
@@ -270,5 +321,46 @@ mod tests {
         let statuses = repo_status(dir.path()).unwrap();
         assert_eq!(statuses.len(), 2);
         assert!(statuses.iter().all(|s| s.staged));
+    }
+
+    #[test]
+    fn discard_change_deletes_a_new_untracked_file() {
+        let dir = init_repo();
+        let file = dir.path().join("new.txt");
+        fs::write(&file, "hi").unwrap();
+        discard_change(dir.path(), "new.txt", ChangeKind::New).unwrap();
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn discard_change_restores_a_modified_tracked_file() {
+        let dir = init_repo();
+        let file = dir.path().join("a.txt");
+        fs::write(&file, "original").unwrap();
+        stage_path(dir.path(), "a.txt").unwrap();
+        commit_staged(dir.path(), "init").unwrap();
+
+        fs::write(&file, "changed").unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "changed");
+
+        discard_change(dir.path(), "a.txt", ChangeKind::Modified).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "original");
+    }
+
+    #[test]
+    fn ignore_path_appends_once_and_skips_duplicates() {
+        let dir = init_repo();
+        ignore_path(dir.path(), "build/output.log").unwrap();
+        ignore_path(dir.path(), "build/output.log").unwrap();
+        let content = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert_eq!(content.matches("build/output.log").count(), 1);
+    }
+
+    #[test]
+    fn ignore_extension_derives_a_glob_from_the_file_extension() {
+        let dir = init_repo();
+        ignore_extension(dir.path(), "notes/todo.log").unwrap();
+        let content = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(content.lines().any(|l| l == "*.log"));
     }
 }

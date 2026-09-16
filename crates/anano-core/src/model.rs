@@ -472,6 +472,10 @@ pub struct AppSettings {
     /// 对齐才好扫；需要看长行时随时可以开。
     #[serde(default)]
     pub wrap_response_body: bool,
+    /// 提交成功后自动 push 到当前分支的远程上游。**默认关**：commit 是本地操作，
+    /// 悄悄联网推送不该是默认行为，得用户自己开。
+    #[serde(default)]
+    pub push_on_commit: bool,
 }
 
 pub const EDITOR_FONT_SIZE_RANGE: std::ops::RangeInclusive<u32> = 10..=24;
@@ -490,6 +494,7 @@ impl Default for AppSettings {
             update_source: UpdateSourcePref::Auto,
             wrap_request_body: true,
             wrap_response_body: false,
+            push_on_commit: false,
         }
     }
 }

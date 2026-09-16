@@ -70,7 +70,9 @@ pub fn sync(repo_path: &Path, op: LfsOp) -> Result<LfsSync, GitError> {
     if output.status.success() {
         Ok(LfsSync::Synced)
     } else {
-        Err(GitError::Lfs(String::from_utf8_lossy(&output.stderr).into_owned()))
+        Err(GitError::Lfs(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
     }
 }
 
@@ -90,8 +92,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(!is_lfs_enabled(dir.path()));
 
-        std::fs::write(dir.path().join(".gitattributes"), "*.psd filter=lfs diff=lfs merge=lfs")
-            .unwrap();
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "*.psd filter=lfs diff=lfs merge=lfs",
+        )
+        .unwrap();
         assert!(is_lfs_enabled(dir.path()));
     }
 
@@ -112,6 +117,9 @@ mod tests {
     #[test]
     fn sync_is_not_applicable_when_repo_has_no_lfs_attributes() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(sync(dir.path(), LfsOp::Fetch).unwrap(), LfsSync::NotApplicable);
+        assert_eq!(
+            sync(dir.path(), LfsOp::Fetch).unwrap(),
+            LfsSync::NotApplicable
+        );
     }
 }

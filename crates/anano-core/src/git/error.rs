@@ -19,4 +19,12 @@ pub enum GitError {
     NoUpstream,
     #[error("git-lfs failed: {0}")]
     Lfs(String),
+    #[error("couldn't discard change: {0}")]
+    Discard(String),
+    #[error("couldn't update .gitignore: {0}")]
+    Ignore(String),
+    #[error("couldn't clone repository: {0}")]
+    Clone(String),
+    #[error("couldn't create repository: {0}")]
+    Init(String),
 }
