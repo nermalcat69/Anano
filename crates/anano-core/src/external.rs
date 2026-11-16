@@ -120,20 +120,45 @@ fn gh_stdout(mut gh: Command) -> Result<String, String> {
     }
 }
 
-/// Every repository the account can reach (its own, collaborations, organisations) as
-/// `owner/name`, most recently pushed first.
-pub fn list_repos(login: &str) -> Result<Vec<String>, String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Repo {
+    /// `owner/name`.
+    pub name: String,
+    pub private: bool,
+}
+
+fn parse_repos(lines: &str) -> Vec<Repo> {
+    lines
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(private, name)| Repo {
+            name: name.to_string(),
+            private: private == "true",
+        })
+        .collect()
+}
+
+/// Every repository the account can reach (its own, collaborations, organisations),
+/// most recently pushed first.
+pub fn list_repos(login: &str) -> Result<Vec<Repo>, String> {
     let mut gh = gh_as(login)?;
     gh.args(["api", "user/repos?per_page=100&sort=pushed", "--paginate"])
-        .args(["-q", ".[].full_name"]);
-    Ok(gh_stdout(gh)?.lines().map(str::to_string).collect())
+        .args(["-q", r#".[] | "\(.private)\t\(.full_name)""#]);
+    Ok(parse_repos(&gh_stdout(gh)?))
 }
 
 /// Create an empty repository on GitHub under the account; returns its HTTPS clone URL.
-pub fn create_repo(login: &str, name: &str, private: bool) -> Result<String, String> {
+pub fn create_repo(
+    login: &str,
+    name: &str,
+    description: &str,
+    private: bool,
+) -> Result<String, String> {
     let mut gh = gh_as(login)?;
     gh.args(["api", "-X", "POST", "user/repos", "-f"])
         .arg(format!("name={name}"))
+        .arg("-f")
+        .arg(format!("description={description}"))
         .arg("-F")
         .arg(format!("private={private}"))
         .args(["-q", ".clone_url"]);
@@ -142,6 +167,48 @@ pub fn create_repo(login: &str, name: &str, private: bool) -> Result<String, Str
         return Err("GitHub didn't return a clone URL".to_string());
     }
     Ok(url)
+}
+
+/// What the "Create repository" dialog offers under Git Ignore and License. Both lists
+/// come from GitHub's own template API, the same source github.com's "new repository"
+/// page uses, so nothing is bundled or goes stale here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Templates {
+    /// Template names, e.g. `Rust`, `Node`.
+    pub gitignores: Vec<String>,
+    /// `(key, display name)`, e.g. `("mit", "MIT License")`.
+    pub licenses: Vec<(String, String)>,
+}
+
+fn gh_api(path: &str, query: &str) -> Result<String, String> {
+    let mut gh = gh()?;
+    gh.args(["api", path, "-q", query]);
+    gh_stdout(gh)
+}
+
+pub fn templates() -> Result<Templates, String> {
+    let gitignores = gh_api("gitignore/templates", ".[]")?;
+    let licenses = gh_api("licenses", r#".[] | "\(.key)\t\(.name)""#)?;
+    Ok(Templates {
+        gitignores: gitignores.lines().map(str::to_string).collect(),
+        licenses: licenses
+            .lines()
+            .filter_map(|l| l.split_once('\t'))
+            .map(|(key, name)| (key.to_string(), name.to_string()))
+            .collect(),
+    })
+}
+
+/// The contents of one `.gitignore` template.
+pub fn gitignore_source(name: &str) -> Result<String, String> {
+    gh_api(&format!("gitignore/templates/{name}"), ".source")
+}
+
+/// The text of one license, with GitHub's `[year]` / `[fullname]` placeholders filled in.
+pub fn license_body(key: &str, year: i64, holder: &str) -> Result<String, String> {
+    Ok(gh_api(&format!("licenses/{key}"), ".body")?
+        .replace("[year]", &year.to_string())
+        .replace("[fullname]", holder))
 }
 
 /// `true` for `https://[user@]github.com/...` only. Guards the token: it must never be
@@ -319,6 +386,17 @@ mod tests {
             ]
         );
         assert!(parse_accounts(b"not json").is_empty());
+    }
+
+    #[test]
+    fn parse_repos_reads_the_private_flag_and_full_name() {
+        assert_eq!(
+            parse_repos("true\tme/secret\nfalse\torg/open\n"),
+            vec![
+                Repo { name: "me/secret".into(), private: true },
+                Repo { name: "org/open".into(), private: false },
+            ]
+        );
     }
 
     #[test]

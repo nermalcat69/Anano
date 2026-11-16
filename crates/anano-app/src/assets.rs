@@ -49,6 +49,11 @@ pub const ICON_TRASH: &str = "icons/trash-2.svg";
 /// 侧栏「History」标签页的图标；默认图标集里没有钟表图形。
 pub const ICON_HISTORY: &str = "icons/history.svg";
 
+/// Clone dialog: private / public repository rows and the "refresh list" button.
+pub const ICON_LOCK: &str = "icons/lock.svg";
+pub const ICON_BOOK: &str = "icons/book.svg";
+pub const ICON_REFRESH: &str = "icons/refresh-cw.svg";
+
 /// 应用自带的资源表：上游 `gpui-component-assets` 只嵌入了一小份「默认」图标
 /// （见其 `default-icons.txt`），这里用到的 git/同步相关图形大多不在其中，
 /// 补在这里；取自 Feather Icons（MIT），与上游图标集同为 24px 描边风格。
@@ -58,6 +63,12 @@ const ASSETS: &[(&str, &[u8])] = &[
     (
         LOGO_DARK_PATH,
         include_bytes!("../assets/logo/logo-dark.svg"),
+    ),
+    (ICON_LOCK, include_bytes!("../assets/icons/lock.svg")),
+    (ICON_BOOK, include_bytes!("../assets/icons/book.svg")),
+    (
+        ICON_REFRESH,
+        include_bytes!("../assets/icons/refresh-cw.svg"),
     ),
     (
         ICON_FOLDER_GIT,

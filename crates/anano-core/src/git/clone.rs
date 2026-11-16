@@ -29,6 +29,33 @@ pub fn init_repo(parent: &Path, name: &str) -> Result<PathBuf, GitError> {
     Ok(dest)
 }
 
+/// `git init` in `parent/name`, then write `files` (relative path, contents) and record them
+/// as the first commit. With no files this is exactly [`init_repo`].
+pub fn init_repo_with(
+    parent: &Path,
+    name: &str,
+    files: &[(&str, String)],
+) -> Result<PathBuf, GitError> {
+    let dest = parent.join(name);
+    // Never scribble into (or commit on top of) a repository that is already there.
+    if dest.join(".git").exists() {
+        return Err(GitError::Init(format!(
+            "{} is already a git repository",
+            dest.display()
+        )));
+    }
+    let dest = init_repo(parent, name)?;
+    if files.is_empty() {
+        return Ok(dest);
+    }
+    for (file, contents) in files {
+        std::fs::write(dest.join(file), contents).map_err(|e| GitError::Init(e.to_string()))?;
+    }
+    crate::git::repo::stage_all(&dest)?;
+    crate::git::repo::commit_staged(&dest, "Initial commit")?;
+    Ok(dest)
+}
+
 /// The URL of `origin`, if the repository has one.
 pub fn origin_url(repo_path: &Path) -> Option<String> {
     let repo = Repository::discover(repo_path).ok()?;
@@ -55,6 +82,29 @@ mod tests {
         let parent = tempfile::tempdir().unwrap();
         let dest = init_repo(parent.path(), "my-repo").unwrap();
         assert!(dest.join(".git").is_dir());
+    }
+
+    #[test]
+    fn init_repo_with_files_makes_the_first_commit_and_refuses_existing_repos() {
+        let parent = tempfile::tempdir().unwrap();
+        // commit_staged needs an identity; give the test one without touching global config.
+        let dest = init_repo(parent.path(), "seed").unwrap();
+        let mut cfg = Repository::open(&dest).unwrap().config().unwrap();
+        cfg.set_str("user.name", "test").unwrap();
+        cfg.set_str("user.email", "a@b.c").unwrap();
+        assert!(init_repo_with(parent.path(), "seed", &[]).is_err());
+
+        if Repository::open(&dest).unwrap().signature().is_ok()
+            && git2::Config::open_default().is_ok_and(|c| c.get_string("user.name").is_ok())
+        {
+            let made =
+                init_repo_with(parent.path(), "fresh", &[("README.md", "# fresh\n".into())])
+                    .unwrap();
+            let repo = Repository::open(&made).unwrap();
+            let head = repo.head().unwrap().peel_to_commit().unwrap();
+            assert_eq!(head.summary(), Some("Initial commit"));
+            assert!(made.join("README.md").exists());
+        }
     }
 
     #[test]
