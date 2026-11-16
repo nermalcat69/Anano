@@ -23,6 +23,8 @@ pub enum GitError {
     Discard(String),
     #[error("couldn't update .gitignore: {0}")]
     Ignore(String),
+    #[error("couldn't read diff: {0}")]
+    Diff(#[source] git2::Error),
     #[error("couldn't clone repository: {0}")]
     Clone(String),
     #[error("couldn't create repository: {0}")]

@@ -1035,6 +1035,34 @@ settings:
     en: About
     zh-CN: 关于
     ja: バージョン情報
+  accounts:
+    en: Accounts
+    zh-CN: 账号
+    ja: アカウント
+  accounts_desc:
+    en: Accounts are shared with the GitHub CLI (gh); tokens stay in your system keychain. Pick one when cloning to use it for that repository.
+    zh-CN: 账号与 GitHub CLI（gh）共用，令牌保存在系统钥匙串中。克隆时选择一个账号，该仓库即使用它。
+    ja: アカウントは GitHub CLI（gh）と共有され、トークンはシステムのキーチェーンに保存されます。クローン時に選ぶと、そのリポジトリで使われます。
+  accounts_none:
+    en: No GitHub account connected yet
+    zh-CN: 尚未连接 GitHub 账号
+    ja: GitHub アカウントはまだ接続されていません
+  accounts_no_gh:
+    en: Install the GitHub CLI (gh) to connect GitHub accounts
+    zh-CN: 请先安装 GitHub CLI（gh）以连接 GitHub 账号
+    ja: GitHub アカウントを接続するには GitHub CLI（gh）をインストールしてください
+  accounts_default:
+    en: default in terminal
+    zh-CN: 终端默认
+    ja: ターミナルの既定
+  accounts_add:
+    en: Add GitHub account…
+    zh-CN: 添加 GitHub 账号…
+    ja: GitHub アカウントを追加…
+  accounts_waiting:
+    en: "Enter code %{code} on the GitHub page that just opened (already copied). Sign in there as the account you want to add."
+    zh-CN: "请在刚打开的 GitHub 页面输入验证码 %{code}（已复制），并以要添加的账号登录。"
+    ja: "開いた GitHub のページでコード %{code} を入力してください（コピー済み）。追加したいアカウントでサインインしてください。"
   appearance:
     en: Appearance
     zh-CN: 外观
@@ -1247,6 +1275,10 @@ repo:
     zh-CN: 关闭仓库
     ja: リポジトリを閉じる
   status:
+    unreadable:
+      en: "Can't read this repository. Was %{path} moved or deleted? Close it from the repository list and add it again from its new location."
+      zh-CN: "无法读取此仓库。%{path} 是否已被移动或删除？请在仓库列表中关闭它，然后从新位置重新添加。"
+      ja: "このリポジトリを読み込めません。%{path} は移動または削除されましたか？リポジトリ一覧で閉じて、新しい場所から追加し直してください。"
     staged_title:
       en: Staged Changes
       zh-CN: 已暂存的改动
@@ -1379,6 +1411,31 @@ repo:
     en: Select a file to see its diff
     zh-CN: 选择一个文件以查看其改动
     ja: ファイルを選択すると変更内容が表示されます
+  diff:
+    loading:
+      en: Loading diff…
+      zh-CN: 正在加载改动…
+      ja: 差分を読み込み中…
+    empty:
+      en: No changes to show
+      zh-CN: 没有可显示的改动
+      ja: 表示する変更はありません
+    truncated:
+      en: Large diff, only the first part is shown
+      zh-CN: 改动过大，仅显示开头部分
+      ja: 差分が大きいため先頭のみ表示しています
+  open_in_nermal:
+    en: Open in Nermal
+    zh-CN: 在 Nermal 中打开
+    ja: Nermal で開く
+  open_in_nermal_tooltip:
+    en: Open this repository's folder in the Nermal IDE
+    zh-CN: 在 Nermal IDE 中打开此仓库的文件夹
+    ja: このリポジトリのフォルダを Nermal IDE で開く
+  open_in_nermal_error:
+    en: "Couldn't open in Nermal: %{error}"
+    zh-CN: "无法在 Nermal 中打开：%{error}"
+    ja: "Nermal で開けませんでした：%{error}"
   tabs:
     changes:
       en: Changes
@@ -1434,6 +1491,14 @@ repo:
       en: Repository URL (https:// or git@…)
       zh-CN: 仓库地址（https:// 或 git@…）
       ja: リポジトリの URL（https:// または git@…）
+    account:
+      en: "Clone as:"
+      zh-CN: "使用账号克隆："
+      ja: "このアカウントでクローン："
+    repos_loading:
+      en: Loading repositories…
+      zh-CN: 正在加载仓库列表…
+      ja: リポジトリを読み込み中…
     destination:
       en: Choose destination folder…
       zh-CN: 选择目标文件夹…
@@ -1455,6 +1520,26 @@ repo:
       en: Repository name
       zh-CN: 仓库名称
       ja: リポジトリ名
+    account:
+      en: "Also create on GitHub as:"
+      zh-CN: "同时在 GitHub 上创建，账号："
+      ja: "GitHub にも作成（アカウント）："
+    visibility:
+      en: "Visibility:"
+      zh-CN: "可见性："
+      ja: "公開範囲："
+    private:
+      en: Private
+      zh-CN: 私有
+      ja: 非公開
+    public:
+      en: Public
+      zh-CN: 公开
+      ja: 公開
+    github_error:
+      en: "Created locally, but not on GitHub: %{error}"
+      zh-CN: "已在本地创建，但未能在 GitHub 上创建：%{error}"
+      ja: "ローカルには作成しましたが、GitHub には作成できませんでした：%{error}"
     location:
       en: Choose location…
       zh-CN: 选择位置…

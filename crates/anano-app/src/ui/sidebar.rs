@@ -26,7 +26,7 @@ use crate::assets::{ICON_FOLDER_GIT, ICON_HISTORY, logo_path};
 use crate::brand::APP_NAME;
 use crate::i18n::tr;
 use crate::state::repos::SyncKind;
-use crate::state::workspace::{SidebarTab, Workspace};
+use crate::state::workspace::{Selected, SidebarTab, Workspace};
 use crate::ui::text::theme_label;
 
 fn theme_icon(pref: ThemePref) -> IconName {
@@ -660,15 +660,25 @@ impl Workspace {
                 .into_any_element();
         }
 
+        let hover_bg = cx.theme().list_hover;
+        let active_bg = cx.theme().list_active;
         let rows: Vec<AnyElement> = repo
             .commits
             .iter()
             .map(|commit| {
+                let target = Selected::Commit(commit.id.clone());
+                let selected = self.selected() == Some(&target);
                 h_flex()
+                    .id(SharedString::from(format!("commit-{}", commit.id)))
                     .h_7()
                     .px_2()
                     .gap_2()
                     .items_center()
+                    .cursor_pointer()
+                    .when(selected, |row| row.bg(active_bg))
+                    .hover(move |style| style.bg(hover_bg))
+                    .aria_selected(selected)
+                    .on_click(cx.listener(move |this, _, _, cx| this.select(target.clone(), cx)))
                     .child(
                         div()
                             .w(px(56.))
@@ -715,6 +725,16 @@ impl Workspace {
         let unstaged: Vec<FileStatus> = repo.unstaged().cloned().collect();
         let clean =
             staged.is_empty() && unstaged.is_empty() && !repo.loading && repo.error.is_none();
+        // A repository whose folder was moved or deleted used to look like an empty one.
+        let error = repo.error.clone().map(|error| {
+            let path = repo.entry.path.display().to_string();
+            v_flex()
+                .gap_1()
+                .text_sm()
+                .text_color(cx.theme().danger)
+                .child(tr!("repo.status.unreadable", path = path))
+                .child(div().text_xs().text_color(muted).child(error))
+        });
 
         v_flex()
             .id("changes")
@@ -724,6 +744,7 @@ impl Workspace {
             .px_2()
             .py_2()
             .overflow_y_scroll()
+            .children(error)
             .child(self.render_file_list(tr!("repo.status.staged_title"), staged, true, cx))
             .child(self.render_file_list(tr!("repo.status.unstaged_title"), unstaged, false, cx))
             .when(clean, |d| {
@@ -750,6 +771,9 @@ impl Workspace {
             return div().into_any_element();
         }
         let workspace = cx.entity();
+        let hover_bg = cx.theme().list_hover;
+        let active_bg = cx.theme().list_active;
+        let radius = cx.theme().radius;
         let rows: Vec<AnyElement> = entries
             .into_iter()
             .enumerate()
@@ -758,10 +782,23 @@ impl Workspace {
                 let kind = status.kind;
                 let menu_workspace = workspace.clone();
                 let menu_file = file.clone();
+                let target = Selected::File {
+                    path: file.clone(),
+                    staged,
+                };
+                let selected = self.selected() == Some(&target);
                 h_flex()
+                    .id(("file-row", staged as usize * 10_000 + ix))
                     .h_7()
+                    .px_1()
                     .gap_2()
                     .items_center()
+                    .rounded(radius)
+                    .cursor_pointer()
+                    .when(selected, |row| row.bg(active_bg))
+                    .hover(move |style| style.bg(hover_bg))
+                    .aria_selected(selected)
+                    .on_click(cx.listener(move |this, _, _, cx| this.select(target.clone(), cx)))
                     .context_menu(move |menu, _, _| {
                         let workspace = menu_workspace.clone();
                         let file = menu_file.clone();
@@ -865,6 +902,8 @@ impl Workspace {
                                 tr!("repo.status.stage")
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                // Don't also select the row: its side is about to change.
+                                cx.stop_propagation();
                                 this.toggle_stage(file.clone(), staged, cx)
                             })),
                     )

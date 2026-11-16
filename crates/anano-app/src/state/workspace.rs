@@ -7,9 +7,13 @@
 
 // 显式导入而非 `use gpui_kit::*`：本文件含 `#[cfg(test)] mod tests`，通配符会引入
 // gpui 重导出的 `#[proc_macro_attribute] test`，与标准库 `#[test]` 同名冲突。
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 
-use anano_core::git::{ChangeKind, GitError, LfsOp, RepoEntry};
+use anano_core::external::{self, Account};
+use anano_core::git::{ChangeKind, DiffView, GitError, LfsOp, RepoEntry};
 use anano_core::model::{ThemePref, Ulid, WorkspaceState};
 use anano_core::store::Loaded;
 use gpui_kit::component::{
@@ -24,9 +28,10 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext, ClipboardItem, Context, Entity, FocusHandle, FontWeight, InteractiveElement,
-    IntoElement, ParentElement, PathPromptOptions, Render, Role, ScrollHandle, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Window, div, px,
+    App, AppContext, ClipboardItem, Context, Entity, FocusHandle, FontWeight, Hsla,
+    InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render, Role, ScrollHandle,
+    ScrollStrategy, SharedString, StatefulInteractiveElement, Styled, Subscription,
+    UniformListScrollHandle, Window, div, px,
 };
 
 use gpui_updater::UpdateStatus;
@@ -58,7 +63,39 @@ pub enum SidebarTab {
     History,
 }
 
+/// Where "Add account" (Settings → Accounts) currently stands.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum LoginState {
+    #[default]
+    Idle,
+    Starting,
+    /// Waiting for the user to type this one-time code into github.com/login/device.
+    Waiting(String),
+    Failed(String),
+}
+
+/// What the main pane is showing the diff of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Selected {
+    /// A row of the Changes tab: the staged (HEAD→index) or unstaged (index→worktree) side.
+    File { path: String, staged: bool },
+    /// A row of the History tab, by full commit id.
+    Commit(String),
+}
+
 pub struct Workspace {
+    selected: Option<Selected>,
+    /// `None` while the diff for `selected` is loading.
+    pub(crate) diff: Option<Result<Rc<DiffView>, String>>,
+    pub(crate) diff_scroll: UniformListScrollHandle,
+    /// Repositories each connected account can clone; filled on demand by the clone dialog.
+    pub(crate) account_repos: HashMap<String, Result<Vec<String>, String>>,
+    /// GitHub accounts `gh` is signed into; refreshed at startup and after each login.
+    pub(crate) accounts: Vec<Account>,
+    pub(crate) login: LoginState,
+    /// Whether the `gh` / `nermal` CLIs exist on this machine (checked once at startup).
+    pub(crate) gh_available: bool,
+    pub(crate) nermal_available: bool,
     repos: Vec<OpenRepo>,
     active: usize,
     sidebar_collapsed: bool,
@@ -101,6 +138,14 @@ impl Workspace {
         } = loaded;
         let state = state.unwrap_or_default();
         let mut ws = Self {
+            selected: None,
+            diff: None,
+            diff_scroll: UniformListScrollHandle::new(),
+            account_repos: HashMap::new(),
+            accounts: Vec::new(),
+            login: LoginState::default(),
+            gh_available: external::gh_available(),
+            nermal_available: external::nermal_available(),
             repos: repos.into_iter().map(OpenRepo::new).collect(),
             active: 0,
             sidebar_collapsed: state.sidebar_collapsed,
@@ -151,6 +196,16 @@ impl Workspace {
                 }
             }));
 
+        ws.refresh_accounts(cx);
+        // Coming back from the editor / terminal: pick up whatever changed on disk meanwhile.
+        ws._subs
+            .push(cx.observe_window_activation(window, |ws, window, cx| {
+                if window.is_window_active() && !ws.repos.is_empty() {
+                    ws.refresh_active_status(cx);
+                    ws.refresh_active_log(cx);
+                    ws.refresh_active_branches(cx);
+                }
+            }));
         // 恢复出来的仓库还没有状态：把当前激活的那个刷一次。
         if !ws.repos.is_empty() {
             ws.refresh_active_status(cx);
@@ -233,6 +288,7 @@ impl Workspace {
             return;
         }
         let entry = RepoEntry::new(path);
+        self.clear_selection();
         self.repos.push(OpenRepo::new(entry));
         self.active = self.repos.len() - 1;
         self.persist_repos(cx);
@@ -245,6 +301,7 @@ impl Workspace {
     pub fn activate(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix < self.repos.len() && ix != self.active {
             self.active = ix;
+            self.clear_selection();
             self.persist_repos(cx);
             cx.notify();
             if self.repos[ix].statuses.is_empty() && !self.repos[ix].loading {
@@ -264,6 +321,7 @@ impl Workspace {
             return;
         }
         self.repos.remove(ix);
+        self.clear_selection();
         if self.active >= self.repos.len() {
             self.active = self.repos.len().saturating_sub(1);
         } else if ix < self.active {
@@ -300,11 +358,10 @@ impl Workspace {
         self.open_repo_dialog(window, cx);
     }
 
-    /// 「Add Repository」→「Clone Repository…」：URL 输入框 + 一个「Clone」按钮，
-    /// 点击后弹原生文件夹选择器挑父目录，仓库名从 URL 最后一段推断
-    /// （去掉常见的 `.git` 后缀）。克隆本身跑在后台线程（`bridge::clone`），
-    /// 认证复用 `anano_core::git::remote::auth_callbacks`（SSH agent / HTTPS credential
-    /// helper），不接 GitHub OAuth——跟这次任务的范围决定一致。
+    /// Add Repository → Clone Repository…: a URL box, plus (when GitHub accounts are
+    /// connected) an account picker. Picking an account lists the repositories it can
+    /// reach; typing filters that list and clicking one fills in the URL. The clone then
+    /// runs as that account (`external::with_account`).
     pub fn open_clone_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_repo_switcher(cx);
         if window.has_active_dialog(cx) {
@@ -313,36 +370,113 @@ impl Workspace {
         let url_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("repo.clone.url_placeholder")));
         let workspace = cx.entity();
+        let account: Rc<RefCell<Option<String>>> = Rc::default();
         window.open_dialog(cx, move |dialog, _, _| {
-            let url_input = url_input.clone();
-            let workspace = workspace.clone();
-            let url_input_for_content = url_input.clone();
+            let (url_c, ws_c, account_c) = (url_input.clone(), workspace.clone(), account.clone());
+            let (url_f, ws_f, account_f) = (url_input.clone(), workspace.clone(), account.clone());
             dialog
                 .title(tr!("repo.clone.title"))
-                .w(px(420.))
-                .content(move |content, _, _| {
-                    content.child(div().rounded(px(6.)).border_1().child(
-                        gpui_kit::component::input::Input::new(&url_input_for_content),
-                    ))
+                .w(px(460.))
+                .content(move |content, _, cx| {
+                    let picked = account_c.borrow().clone();
+                    let query = url_c.read(cx).value().trim().to_lowercase();
+                    let (logins, repos) = {
+                        let ws = ws_c.read(cx);
+                        let repos = picked.as_ref().map(|l| ws.account_repos.get(l).cloned());
+                        (ws.account_logins(), repos)
+                    };
+                    let muted = cx.theme().muted_foreground;
+                    let danger = cx.theme().danger;
+                    let hover = cx.theme().list_hover;
+                    let radius = cx.theme().radius;
+                    let ws_pick = ws_c.clone();
+                    let content = content
+                        .child(
+                            div()
+                                .rounded(px(6.))
+                                .border_1()
+                                .child(gpui_kit::component::input::Input::new(&url_c)),
+                        )
+                        .child(account_picker(
+                            tr!("repo.clone.account"),
+                            logins,
+                            account_c.clone(),
+                            "clone-account",
+                            muted,
+                            move |login, cx| {
+                                if let Some(login) = login {
+                                    ws_pick.update(cx, |ws, cx| ws.load_account_repos(login, cx));
+                                }
+                            },
+                        ));
+                    let Some(repos) = repos else {
+                        return content;
+                    };
+                    let note = |text: SharedString, color| {
+                        div().mt_2().text_xs().text_color(color).child(text)
+                    };
+                    match repos {
+                        None => content.child(note(tr!("repo.clone.repos_loading"), muted)),
+                        Some(Err(err)) => content.child(note(err.into(), danger)),
+                        Some(Ok(repos)) => {
+                            let url_c = url_c.clone();
+                            content.child(
+                                v_flex()
+                                    .id("clone-repo-list")
+                                    .mt_2()
+                                    .max_h(px(220.))
+                                    .overflow_y_scroll()
+                                    .children(
+                                        repos
+                                            .into_iter()
+                                            // A full URL in the box isn't a search term.
+                                            .filter(|r| {
+                                                query.contains("://")
+                                                    || r.to_lowercase().contains(&query)
+                                            })
+                                            .take(200)
+                                            .enumerate()
+                                            .map(move |(ix, name)| {
+                                                let url_c = url_c.clone();
+                                                let url = format!("https://github.com/{name}.git");
+                                                div()
+                                                    .id(("clone-repo", ix))
+                                                    .px_2()
+                                                    .py_1()
+                                                    .rounded(radius)
+                                                    .text_sm()
+                                                    .cursor_pointer()
+                                                    .hover(move |style| style.bg(hover))
+                                                    .child(name)
+                                                    .on_click(move |_, window, cx| {
+                                                        url_c.update(cx, |input, cx| {
+                                                            input.set_value(url.clone(), window, cx)
+                                                        });
+                                                    })
+                                            }),
+                                    ),
+                            )
+                        }
+                    }
                 })
                 .footer(
                     gpui_kit::component::dialog::DialogFooter::new().child(
                         Button::new("clone-confirm")
                             .primary()
                             .label(tr!("repo.clone.action"))
-                            .on_click({
-                                let url_input = url_input.clone();
-                                let workspace = workspace.clone();
-                                move |_, window, cx| {
-                                    let url = url_input.read(cx).value().trim().to_string();
-                                    window.close_dialog(cx);
-                                    if url.is_empty() {
-                                        return;
-                                    }
-                                    workspace.update(cx, |ws, cx| {
-                                        ws.pick_clone_destination(url, window, cx)
-                                    });
+                            .on_click(move |_, window, cx| {
+                                let url = url_f.read(cx).value().trim().to_string();
+                                window.close_dialog(cx);
+                                if url.is_empty() {
+                                    return;
                                 }
+                                let url = match account_f.borrow().as_deref() {
+                                    Some(login) => external::with_account(&url, login),
+                                    None => url,
+                                };
+                                ws_f.update(cx, |ws, cx| {
+                                    ws.pick_clone_destination(url, window, cx)
+                                });
                             }),
                     ),
                 )
@@ -390,8 +524,9 @@ impl Workspace {
         .detach();
     }
 
-    /// 「Add Repository」→「Create New Repository…」：名字输入框 + 一个「Create」按钮，
-    /// 点击后弹文件夹选择器挑父目录，在 `<parent>/<name>` 跑 `git2::Repository::init`。
+    /// Add Repository → Create New Repository…: a name, then a folder picker for where it
+    /// goes. With a GitHub account picked, the repository is also created on GitHub under
+    /// that account (private unless toggled) and set up as `origin`.
     pub fn open_create_repo_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_repo_switcher(cx);
         if window.has_active_dialog(cx) {
@@ -400,43 +535,100 @@ impl Workspace {
         let name_input = cx
             .new(|cx| InputState::new(window, cx).placeholder(tr!("repo.create.name_placeholder")));
         let workspace = cx.entity();
+        let account: Rc<RefCell<Option<String>>> = Rc::default();
+        let private = Rc::new(Cell::new(true));
         window.open_dialog(cx, move |dialog, _, _| {
-            let name_input = name_input.clone();
-            let workspace = workspace.clone();
-            let name_input_for_content = name_input.clone();
+            let (name_c, ws_c, account_c, private_c) = (
+                name_input.clone(),
+                workspace.clone(),
+                account.clone(),
+                private.clone(),
+            );
+            let (name_f, ws_f, account_f, private_f) = (
+                name_input.clone(),
+                workspace.clone(),
+                account.clone(),
+                private.clone(),
+            );
             dialog
                 .title(tr!("repo.create.title"))
-                .w(px(420.))
-                .content(move |content, _, _| {
-                    content.child(div().rounded(px(6.)).border_1().child(
-                        gpui_kit::component::input::Input::new(&name_input_for_content),
-                    ))
+                .w(px(460.))
+                .content(move |content, _, cx| {
+                    let logins = ws_c.read(cx).account_logins();
+                    let muted = cx.theme().muted_foreground;
+                    let on_github = account_c.borrow().is_some();
+                    let is_private = private_c.get();
+                    let private_c = private_c.clone();
+                    content
+                        .child(
+                            div()
+                                .rounded(px(6.))
+                                .border_1()
+                                .child(gpui_kit::component::input::Input::new(&name_c)),
+                        )
+                        .child(account_picker(
+                            tr!("repo.create.account"),
+                            logins,
+                            account_c.clone(),
+                            "create-account",
+                            muted,
+                            |_, _| {},
+                        ))
+                        .when(on_github, |content| {
+                            content.child(
+                                h_flex()
+                                    .mt_2()
+                                    .gap_2()
+                                    .items_center()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(tr!("repo.create.visibility"))
+                                    .child(
+                                        Button::new("create-visibility")
+                                            .xsmall()
+                                            .outline()
+                                            .label(if is_private {
+                                                tr!("repo.create.private")
+                                            } else {
+                                                tr!("repo.create.public")
+                                            })
+                                            .on_click(move |_, window, _| {
+                                                private_c.set(!is_private);
+                                                window.refresh();
+                                            }),
+                                    ),
+                            )
+                        })
                 })
                 .footer(
                     gpui_kit::component::dialog::DialogFooter::new().child(
                         Button::new("create-repo-confirm")
                             .primary()
                             .label(tr!("repo.create.action"))
-                            .on_click({
-                                let name_input = name_input.clone();
-                                let workspace = workspace.clone();
-                                move |_, window, cx| {
-                                    let name = name_input.read(cx).value().trim().to_string();
-                                    window.close_dialog(cx);
-                                    if name.is_empty() {
-                                        return;
-                                    }
-                                    workspace.update(cx, |ws, cx| {
-                                        ws.pick_create_location(name, window, cx)
-                                    });
+                            .on_click(move |_, window, cx| {
+                                let name = name_f.read(cx).value().trim().to_string();
+                                window.close_dialog(cx);
+                                if name.is_empty() {
+                                    return;
                                 }
+                                let github =
+                                    account_f.borrow().clone().map(|l| (l, private_f.get()));
+                                ws_f.update(cx, |ws, cx| {
+                                    ws.pick_create_location(name, github, window, cx)
+                                });
                             }),
                     ),
                 )
         });
     }
 
-    fn pick_create_location(&mut self, name: String, _window: &mut Window, cx: &mut Context<Self>) {
+    fn pick_create_location(
+        &mut self,
+        name: String,
+        github: Option<(String, bool)>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -448,17 +640,28 @@ impl Workspace {
                 return;
             };
             let Some(parent) = paths.pop() else { return };
-            let _ = ws.update(cx, |ws, cx| ws.create_repo_into(parent, name, cx));
+            let _ = ws.update(cx, |ws, cx| ws.create_repo_into(parent, name, github, cx));
         })
         .detach();
     }
 
-    fn create_repo_into(&mut self, parent: PathBuf, name: String, cx: &mut Context<Self>) {
-        let task = bridge::init_new_repo(cx, parent, name);
+    fn create_repo_into(
+        &mut self,
+        parent: PathBuf,
+        name: String,
+        github: Option<(String, bool)>,
+        cx: &mut Context<Self>,
+    ) {
+        let task = bridge::create_repo(cx, parent, name, github);
         cx.spawn(async move |ws, cx| {
             let result = task.await;
             let _ = ws.update(cx, |ws, cx| match result {
-                Ok(Ok(path)) => ws.open_repo_path(path, cx),
+                Ok(Ok((path, github_error))) => {
+                    ws.open_repo_path(path, cx);
+                    if let Some(err) = github_error {
+                        ws.notify_add_repo_error(tr!("repo.create.github_error", error = err), cx);
+                    }
+                }
                 Ok(Err(err)) => {
                     ws.notify_add_repo_error(tr!("repo.create.error", error = err.to_string()), cx)
                 }
@@ -466,6 +669,140 @@ impl Workspace {
                     ws.notify_add_repo_error(tr!("repo.create.error", error = err.to_string()), cx)
                 }
             });
+        })
+        .detach();
+    }
+
+    pub(crate) fn account_logins(&self) -> Vec<String> {
+        self.accounts.iter().map(|a| a.login.clone()).collect()
+    }
+
+    /// Fetch (once per session) the repositories an account can clone.
+    pub fn load_account_repos(&mut self, login: String, cx: &mut Context<Self>) {
+        if self.account_repos.contains_key(&login) {
+            return;
+        }
+        let task = bridge::account_repos(cx, login.clone());
+        cx.spawn(async move |ws, cx| {
+            let repos = task.await.map_err(|e| e.to_string());
+            let _ = ws.update(cx, |ws, cx| {
+                ws.account_repos.insert(login, repos);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Show a changed file's diff or a commit's diff in the main pane.
+    pub fn select(&mut self, selected: Selected, cx: &mut Context<Self>) {
+        if self.selected.as_ref() != Some(&selected) {
+            self.diff = None;
+            self.diff_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        }
+        self.selected = Some(selected);
+        self.load_diff(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn selected(&self) -> Option<&Selected> {
+        self.selected.as_ref()
+    }
+
+    fn clear_selection(&mut self) {
+        self.selected = None;
+        self.diff = None;
+    }
+
+    /// (Re)load the diff for the current selection; the old one stays on screen meanwhile.
+    fn load_diff(&mut self, cx: &mut Context<Self>) {
+        let (Some(repo), Some(selected)) = (self.active_repo(), self.selected.clone()) else {
+            return;
+        };
+        let task = bridge::diff(cx, repo.entry.path.clone(), selected.clone());
+        cx.spawn(async move |ws, cx| {
+            let result = task.await;
+            let _ = ws.update(cx, |ws, cx| {
+                // The user may have clicked something else while this was loading.
+                if ws.selected.as_ref() != Some(&selected) {
+                    return;
+                }
+                ws.diff = Some(match result {
+                    Ok(Ok(view)) => Ok(Rc::new(view)),
+                    Ok(Err(err)) => Err(err.to_string()),
+                    Err(err) => Err(err.to_string()),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Re-read which GitHub accounts `gh` is signed into.
+    pub fn refresh_accounts(&mut self, cx: &mut Context<Self>) {
+        let task = bridge::accounts(cx);
+        cx.spawn(async move |ws, cx| {
+            let accounts = task.await.unwrap_or_default();
+            let _ = ws.update(cx, |ws, cx| {
+                ws.accounts = accounts;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Settings → Accounts → "Add GitHub account": `gh`'s device flow. We copy the one-time
+    /// code, open the GitHub page, and wait for `gh` to report the outcome.
+    pub fn add_account(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.login, LoginState::Starting | LoginState::Waiting(_)) {
+            return;
+        }
+        self.login = LoginState::Starting;
+        cx.notify();
+        let start = bridge::start_login(cx);
+        cx.spawn(async move |ws, cx| {
+            let result = match start.await {
+                Err(err) => Err(err),
+                Ok(pending) => {
+                    let finish = ws.update(cx, |ws, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(pending.code.clone()));
+                        cx.open_url(external::GITHUB_DEVICE_URL);
+                        ws.login = LoginState::Waiting(pending.code.clone());
+                        cx.notify();
+                        bridge::finish_login(cx, pending)
+                    });
+                    match finish {
+                        Ok(finish) => finish.await,
+                        Err(err) => Err(err),
+                    }
+                }
+            };
+            let _ = ws.update(cx, |ws, cx| {
+                ws.login = match result {
+                    Ok(()) => LoginState::Idle,
+                    Err(err) => LoginState::Failed(err.to_string()),
+                };
+                ws.refresh_accounts(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// "Open in Nermal": open the active repository's directory in the Nermal IDE.
+    pub fn open_in_nermal(&mut self, cx: &mut Context<Self>) {
+        let Some(repo) = self.active_repo() else {
+            return;
+        };
+        let task = bridge::open_in_nermal(cx, repo.entry.path.clone());
+        cx.spawn(async move |ws, cx| {
+            if let Err(err) = task.await {
+                let _ = ws.update(cx, |ws, cx| {
+                    ws.notify_add_repo_error(
+                        tr!("repo.open_in_nermal_error", error = err.to_string()),
+                        cx,
+                    )
+                });
+            }
         })
         .detach();
     }
@@ -586,6 +923,10 @@ impl Workspace {
                     }
                     Ok(Err(err)) => repo.error = Some(err.to_string()),
                     Err(err) => repo.error = Some(err.to_string()),
+                }
+                // The file on screen may just have changed, been staged, or been committed.
+                if matches!(ws.selected, Some(Selected::File { .. })) {
+                    ws.load_diff(cx);
                 }
                 cx.notify();
             });
@@ -1075,6 +1416,43 @@ fn action_error<T>(result: anyhow::Result<Result<T, GitError>>) -> Option<String
         Ok(Err(err)) => Some(err.to_string()),
         Err(err) => Some(err.to_string()),
     }
+}
+
+/// "GitHub account: [one] [two]" row shared by the clone and create dialogs. Clicking the
+/// picked account again unpicks it. Renders nothing when no account is connected.
+fn account_picker(
+    label: SharedString,
+    logins: Vec<String>,
+    picked: Rc<RefCell<Option<String>>>,
+    id: &'static str,
+    muted: Hsla,
+    on_change: impl Fn(Option<String>, &mut App) + Clone + 'static,
+) -> impl IntoElement {
+    let current = picked.borrow().clone();
+    h_flex()
+        .when(!logins.is_empty(), |row| row.mt_2().child(label))
+        .gap_1()
+        .items_center()
+        .flex_wrap()
+        .text_xs()
+        .text_color(muted)
+        .children(logins.into_iter().enumerate().map(|(ix, login)| {
+            let selected = current.as_deref() == Some(login.as_str());
+            let picked = picked.clone();
+            let on_change = on_change.clone();
+            let button = Button::new((id, ix)).xsmall().label(login.clone());
+            if selected {
+                button.primary()
+            } else {
+                button.outline()
+            }
+            .on_click(move |_, window, cx| {
+                let next = (!selected).then(|| login.clone());
+                *picked.borrow_mut() = next.clone();
+                on_change(next, cx);
+                window.refresh();
+            })
+        }))
 }
 
 /// 从 git URL 推断仓库名：取最后一段，去掉常见的 `.git` 后缀与末尾斜杠。

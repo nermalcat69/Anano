@@ -31,7 +31,7 @@ use crate::i18n::tr;
 use crate::state::settings;
 use crate::state::store::store;
 use crate::state::update::{self, InstallKind};
-use crate::state::workspace::Workspace;
+use crate::state::workspace::{LoginState, Workspace};
 use crate::ui::text::{language_label, theme_label, update_source_label};
 
 // 对话框尺寸按像素定：Dialog 的 `w()` 只收 Pixels，内容高度要和它配套，
@@ -48,17 +48,19 @@ const LOGO_SIZE: f32 = 56.;
 #[allow(dead_code)]
 pub enum SettingsPage {
     General = 0,
-    Request = 1,
-    Data = 2,
-    Updates = 3,
-    About = 4,
+    Accounts = 1,
+    Request = 2,
+    Data = 3,
+    Updates = 4,
+    About = 5,
 }
 
 /// 侧栏里页的排列顺序，也是 [`render_settings`] 构建页的唯一依据。
 /// 加一页 = 加一个枚举变体（判别值接在末尾）+ 在这里排好位置 + 在 `render_settings`
 /// 的 match 里给出构造函数；漏了哪一步都有编译错误或测试失败兜住。
-const PAGE_ORDER: [SettingsPage; 5] = [
+const PAGE_ORDER: [SettingsPage; 6] = [
     SettingsPage::General,
+    SettingsPage::Accounts,
     SettingsPage::Request,
     SettingsPage::Data,
     SettingsPage::Updates,
@@ -131,6 +133,7 @@ fn render_settings(workspace: WeakEntity<Workspace>, page: SettingsPage, cx: &Ap
     for entry in PAGE_ORDER {
         settings = settings.page(match entry {
             SettingsPage::General => general_page(workspace.clone()),
+            SettingsPage::Accounts => accounts_page(workspace.clone()),
             SettingsPage::Request => request_page(),
             SettingsPage::Data => data_page(cx),
             SettingsPage::Updates => updates_page(),
@@ -250,6 +253,93 @@ fn linux_system_group() -> SettingGroup {
         )
         .description(tr!("settings.app_menu_entry_desc")),
     )
+}
+
+/// Connected GitHub accounts. They are the accounts the `gh` CLI is signed into (tokens stay
+/// in the OS keychain, see `anano_core::external`); this page lists them and adds more.
+fn accounts_page(workspace: WeakEntity<Workspace>) -> SettingPage {
+    SettingPage::new(tr!("settings.accounts"))
+        .icon(IconName::Github)
+        .group(
+            SettingGroup::new()
+                .title("GitHub")
+                .description(tr!("settings.accounts_desc"))
+                .item(SettingItem::render(move |_, _, cx| {
+                    let Some(ws) = workspace.upgrade() else {
+                        return div().into_any_element();
+                    };
+                    let (accounts, login, gh_available) = {
+                        let ws = ws.read(cx);
+                        (ws.accounts.clone(), ws.login.clone(), ws.gh_available)
+                    };
+                    let muted = cx.theme().muted_foreground;
+                    let danger = cx.theme().danger;
+                    if !gh_available {
+                        return div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child(tr!("settings.accounts_no_gh"))
+                            .into_any_element();
+                    }
+                    let busy = matches!(login, LoginState::Starting | LoginState::Waiting(_));
+                    let (note, note_color) = match login {
+                        LoginState::Waiting(code) => {
+                            (Some(tr!("settings.accounts_waiting", code = code)), muted)
+                        }
+                        LoginState::Failed(error) => (Some(SharedString::from(error)), danger),
+                        _ => (None, muted),
+                    };
+                    v_flex()
+                        .w_full()
+                        .gap_2()
+                        .text_sm()
+                        .when(accounts.is_empty(), |v| {
+                            v.child(div().text_color(muted).child(tr!("settings.accounts_none")))
+                        })
+                        .children(accounts.into_iter().map(|account| {
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(Icon::new(IconName::Github).size_4())
+                                .child(div().font_weight(FontWeight::MEDIUM).child(account.login))
+                                .when(account.active, |row| {
+                                    row.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(tr!("settings.accounts_default")),
+                                    )
+                                })
+                        }))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_3()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .text_xs()
+                                        .text_color(note_color)
+                                        .children(note),
+                                )
+                                .child(
+                                    Button::new("add-github-account")
+                                        .outline()
+                                        .small()
+                                        .flex_shrink_0()
+                                        .label(tr!("settings.accounts_add"))
+                                        .loading(busy)
+                                        .disabled(busy)
+                                        .on_click(move |_, _, cx| {
+                                            ws.update(cx, |ws, cx| ws.add_account(cx))
+                                        }),
+                                ),
+                        )
+                        .into_any_element()
+                })),
+        )
 }
 
 fn request_page() -> SettingPage {

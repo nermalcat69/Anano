@@ -4,6 +4,7 @@
 
 pub mod branch;
 pub mod clone;
+pub mod diff;
 pub mod error;
 pub mod lfs;
 pub mod model;
@@ -14,7 +15,8 @@ pub mod status;
 pub use branch::{
     checkout_branch, create_branch, current_branch_name, delete_branch, list_branches,
 };
-pub use clone::{clone_repo, init_repo};
+pub use clone::{clone_repo, init_repo, set_origin};
+pub use diff::{DiffLine, DiffView, LineKind, diff_commit, diff_file};
 pub use error::GitError;
 pub use lfs::{LfsOp, LfsSync, is_lfs_enabled, is_lfs_installed, is_lfs_pointer};
 pub use model::{Branch, ChangeKind, CommitInfo, FileStatus, RepoEntry};

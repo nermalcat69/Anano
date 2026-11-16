@@ -3,12 +3,13 @@
 
 use std::path::PathBuf;
 
+use anano_core::external::{self, Account, PendingLogin};
 use anano_core::git::lfs::sync as lfs_sync;
 use anano_core::git::{
-    Branch, ChangeKind, CommitInfo, FileStatus, GitError, LfsOp, LfsSync, checkout_branch,
-    clone_repo, commit_staged, create_branch, delete_branch, discard_change, discover_root, fetch,
-    ignore_extension, ignore_path, init_repo, list_branches, pull, push, recent_commits,
-    repo_status, stage_all, stage_path, unstage_path,
+    Branch, ChangeKind, CommitInfo, DiffView, FileStatus, GitError, LfsOp, LfsSync,
+    checkout_branch, clone_repo, commit_staged, create_branch, delete_branch, discard_change,
+    discover_root, fetch, ignore_extension, ignore_path, init_repo, list_branches, pull, push,
+    recent_commits, repo_status, stage_all, stage_path, unstage_path,
 };
 use gpui_kit::{App, Task};
 use gpui_tokio::Tokio;
@@ -162,17 +163,6 @@ pub fn clone(
     })
 }
 
-/// `git init`（Add Repository → Create New Repository）。
-pub fn init_new_repo(
-    cx: &App,
-    parent: PathBuf,
-    name: String,
-) -> Task<anyhow::Result<Result<PathBuf, GitError>>> {
-    Tokio::spawn_result(cx, async move {
-        Ok(tokio::task::spawn_blocking(move || init_repo(&parent, &name)).await?)
-    })
-}
-
 /// 丢弃一个文件的改动（右键菜单「Discard Changes」）。
 pub fn discard(
     cx: &App,
@@ -216,5 +206,92 @@ pub fn sync_lfs(
 ) -> Task<anyhow::Result<Result<LfsSync, GitError>>> {
     Tokio::spawn_result(cx, async move {
         Ok(tokio::task::spawn_blocking(move || lfs_sync(&repo, op)).await?)
+    })
+}
+
+/// GitHub accounts `gh` is signed into (Settings → Accounts, clone dialog).
+pub fn accounts(cx: &App) -> Task<anyhow::Result<Vec<Account>>> {
+    Tokio::spawn_result(cx, async move {
+        Ok(tokio::task::spawn_blocking(external::list_accounts).await?)
+    })
+}
+
+/// First half of "Add account": resolves once `gh` has a one-time code to show.
+pub fn start_login(cx: &App) -> Task<anyhow::Result<PendingLogin>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(external::start_login)
+            .await?
+            .map_err(anyhow::Error::msg)
+    })
+}
+
+/// Second half: resolves when the user finished (or abandoned) the browser step.
+pub fn finish_login(cx: &App, pending: PendingLogin) -> Task<anyhow::Result<()>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || pending.finish())
+            .await?
+            .map_err(anyhow::Error::msg)
+    })
+}
+
+/// Open a repository directory in the Nermal IDE.
+pub fn open_in_nermal(cx: &App, path: PathBuf) -> Task<anyhow::Result<()>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || external::open_in_nermal(&path))
+            .await?
+            .map_err(anyhow::Error::msg)
+    })
+}
+
+/// Repositories a connected account can clone (`owner/name`).
+pub fn account_repos(cx: &App, login: String) -> Task<anyhow::Result<Vec<String>>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || external::list_repos(&login))
+            .await?
+            .map_err(anyhow::Error::msg)
+    })
+}
+
+/// Where the new repository is, plus why the GitHub half failed (if it did).
+pub type CreatedRepo = (PathBuf, Option<String>);
+
+/// `git init` in `parent/name`; with `github = (login, private)` also create the repository
+/// on GitHub under that account and wire it up as `origin`. The local repository survives a
+/// GitHub failure; that failure comes back as the second tuple field.
+pub fn create_repo(
+    cx: &App,
+    parent: PathBuf,
+    name: String,
+    github: Option<(String, bool)>,
+) -> Task<anyhow::Result<Result<CreatedRepo, GitError>>> {
+    Tokio::spawn_result(cx, async move {
+        Ok(tokio::task::spawn_blocking(move || {
+            let path = init_repo(&parent, &name)?;
+            let Some((login, private)) = github else {
+                return Ok((path, None));
+            };
+            let remote = external::create_repo(&login, &name, private).and_then(|url| {
+                anano_core::git::set_origin(&path, &external::with_account(&url, &login))
+                    .map_err(|e| e.to_string())
+            });
+            Ok((path, remote.err()))
+        })
+        .await?)
+    })
+}
+
+/// Diff for the main pane: one changed file, or a whole commit.
+pub fn diff(
+    cx: &App,
+    repo: PathBuf,
+    selected: crate::state::workspace::Selected,
+) -> Task<anyhow::Result<Result<DiffView, GitError>>> {
+    use crate::state::workspace::Selected;
+    Tokio::spawn_result(cx, async move {
+        Ok(tokio::task::spawn_blocking(move || match selected {
+            Selected::File { path, staged } => anano_core::git::diff_file(&repo, &path, staged),
+            Selected::Commit(id) => anano_core::git::diff_commit(&repo, &id),
+        })
+        .await?)
     })
 }

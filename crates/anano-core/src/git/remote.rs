@@ -22,7 +22,23 @@ fn open(path: &Path) -> Result<git2::Repository, GitError> {
 /// 建立在 `pub(crate)` 上：`clone.rs` 里的克隆也要用同一套认证回调，不重复实现。
 pub(crate) fn auth_callbacks() -> RemoteCallbacks<'static> {
     let mut cb = RemoteCallbacks::new();
-    cb.credentials(|url, username_from_url, allowed| {
+    let mut attempts = 0;
+    cb.credentials(move |url, username_from_url, allowed| {
+        // libgit2 asks again every time the server rejects what we returned; without a cap
+        // a revoked token or a wrong key means an endless loop instead of an error.
+        attempts += 1;
+        if attempts > 4 {
+            return Err(git2::Error::from_str("the server rejected the credentials"));
+        }
+        // `https://<login>@github.com/...` pins the repository to one connected GitHub
+        // account (see `external::with_account`); use that account's token.
+        if allowed.contains(CredentialType::USER_PASS_PLAINTEXT)
+            && let Some(login) = username_from_url
+            && crate::external::is_github_https(url)
+            && let Some(token) = crate::external::token(login)
+        {
+            return Cred::userpass_plaintext(login, &token);
+        }
         if allowed.contains(CredentialType::SSH_KEY)
             && let Some(user) = username_from_url
             && let Ok(cred) = Cred::ssh_key_from_agent(user)
@@ -138,6 +154,13 @@ pub fn push(repo_path: &Path, remote_name: &str, branch_name: &str) -> Result<()
 
     if let Some(msg) = rejected.into_inner() {
         return Err(GitError::Remote(git2::Error::from_str(&msg)));
+    }
+    // First push of a branch (e.g. a repository just created on GitHub): track the remote
+    // branch, otherwise pull and the ahead/behind count have nothing to compare against.
+    if let Ok(mut branch) = repo.find_branch(branch_name, BranchType::Local)
+        && branch.upstream().is_err()
+    {
+        let _ = branch.set_upstream(Some(&format!("{remote_name}/{branch_name}")));
     }
     Ok(())
 }

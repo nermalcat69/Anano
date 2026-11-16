@@ -29,6 +29,16 @@ pub fn init_repo(parent: &Path, name: &str) -> Result<PathBuf, GitError> {
     Ok(dest)
 }
 
+/// Point `origin` at `url` (adding the remote if the repository has none yet).
+pub fn set_origin(repo_path: &Path, url: &str) -> Result<(), GitError> {
+    let repo = Repository::open(repo_path).map_err(GitError::Open)?;
+    match repo.find_remote("origin") {
+        Ok(_) => repo.remote_set_url("origin", url),
+        Err(_) => repo.remote("origin", url).map(|_| ()),
+    }
+    .map_err(GitError::Remote)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
