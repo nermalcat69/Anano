@@ -101,13 +101,13 @@ pub fn open_settings_page(
                     .w_full()
                     .justify_between()
                     .child(
-                        Button::new("reset-settings")
+                        crate::ui::button("reset-settings")
                             .ghost()
                             .label(tr!("settings.reset"))
                             .on_click(|_, _, cx| settings::reset(cx)),
                     )
                     .child(
-                        Button::new("close-settings")
+                        crate::ui::button("close-settings")
                             .primary()
                             .label(tr!("common.done"))
                             .on_click(|_, window, cx| window.close_dialog(cx)),
@@ -325,7 +325,7 @@ fn accounts_page(workspace: WeakEntity<Workspace>) -> SettingPage {
                                         .children(note),
                                 )
                                 .child(
-                                    Button::new("add-github-account")
+                                    crate::ui::button("add-github-account")
                                         .outline()
                                         .small()
                                         .flex_shrink_0()
@@ -456,7 +456,7 @@ fn data_page(cx: &App) -> SettingPage {
                         )
                         .child({
                             let path = path_for_reveal.clone();
-                            Button::new("reveal-data-dir")
+                            crate::ui::button("reveal-data-dir")
                                 .outline()
                                 .small()
                                 .label(if cfg!(target_os = "macos") {
@@ -612,7 +612,7 @@ fn render_update_row(cx: &App) -> AnyElement {
         UpdateStatus::Idle | UpdateStatus::UpToDate => actions = actions.child(check_button(false)),
         UpdateStatus::Checking => actions = actions.child(check_button(true)),
         UpdateStatus::Available(_) => {
-            let install = Button::new("install-update")
+            let install = crate::ui::button("install-update")
                 .small()
                 .label(tr!("settings.install_update"));
             actions = actions
@@ -628,7 +628,7 @@ fn render_update_row(cx: &App) -> AnyElement {
         UpdateStatus::Downloading { .. } | UpdateStatus::Installing => {}
         UpdateStatus::Staged(_) => {
             actions = actions.child(
-                Button::new("restart-update")
+                crate::ui::button("restart-update")
                     .primary()
                     .small()
                     .label(tr!("settings.restart"))
@@ -638,7 +638,7 @@ fn render_update_row(cx: &App) -> AnyElement {
         UpdateStatus::Errored(_) => {
             actions = actions
                 .child(
-                    Button::new("retry-update")
+                    crate::ui::button("retry-update")
                         .outline()
                         .small()
                         .label(tr!("settings.retry"))
@@ -698,7 +698,7 @@ fn render_update_row(cx: &App) -> AnyElement {
 }
 
 fn check_button(checking: bool) -> Button {
-    Button::new("check-updates")
+    crate::ui::button("check-updates")
         .outline()
         .small()
         .label(tr!("settings.check_updates"))

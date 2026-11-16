@@ -144,7 +144,14 @@ pub fn list_repos(login: &str) -> Result<Vec<Repo>, String> {
     let mut gh = gh_as(login)?;
     gh.args(["api", "user/repos?per_page=100&sort=pushed", "--paginate"])
         .args(["-q", r#".[] | "\(.private)\t\(.full_name)""#]);
-    Ok(parse_repos(&gh_stdout(gh)?))
+    let lines = gh_stdout(gh)?;
+    if let Some(file) = repos_cache_file(login)
+        && let Some(dir) = file.parent()
+        && std::fs::create_dir_all(dir).is_ok()
+    {
+        let _ = std::fs::write(file, &lines);
+    }
+    Ok(parse_repos(&lines))
 }
 
 /// Create an empty repository on GitHub under the account; returns its HTTPS clone URL.
@@ -209,6 +216,302 @@ pub fn license_body(key: &str, year: i64, holder: &str) -> Result<String, String
     Ok(gh_api(&format!("licenses/{key}"), ".body")?
         .replace("[year]", &year.to_string())
         .replace("[fullname]", holder))
+}
+
+/// `owner/name` for a GitHub remote: what `gh --repo` and the REST API call a repository.
+pub fn repo_slug(origin: &str) -> Option<String> {
+    let path = github_repo_path(origin)?;
+    let path = path
+        .strip_suffix(".git")
+        .unwrap_or(path)
+        .trim_end_matches('/');
+    (!path.is_empty()).then(|| path.to_string())
+}
+
+/// One row of the pull request list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequest {
+    pub number: u64,
+    pub title: String,
+    pub author: String,
+    /// `OPEN`, `MERGED` or `CLOSED`, as GitHub spells them.
+    pub state: String,
+    pub draft: bool,
+    pub head: String,
+    pub base: String,
+    /// Unix seconds.
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrEventKind {
+    Commit,
+    Comment,
+    /// A review: `text` starts with its verdict (`APPROVED`, `CHANGES_REQUESTED`, …).
+    Review,
+}
+
+/// One entry of a pull request's history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrEvent {
+    pub kind: PrEventKind,
+    pub author: String,
+    pub at: i64,
+    pub text: String,
+}
+
+/// Everything shown when a pull request is opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestDetail {
+    pub summary: PullRequest,
+    /// The description, as Markdown.
+    pub body: String,
+    pub url: String,
+    pub additions: u64,
+    pub deletions: u64,
+    pub changed_files: u64,
+    /// GitHub's own verdicts, passed through untouched: `mergeable` is `MERGEABLE`,
+    /// `CONFLICTING` or `UNKNOWN`; `merge_state` is `CLEAN`, `BLOCKED`, `BEHIND`, `DIRTY`,
+    /// `DRAFT`, `UNSTABLE`, `HAS_HOOKS` or `UNKNOWN`.
+    pub mergeable: String,
+    pub merge_state: String,
+    /// Commits, comments and reviews, oldest first.
+    pub events: Vec<PrEvent>,
+}
+
+/// `2026-09-14T23:16:15Z` → Unix seconds (GitHub always answers in UTC, to the second).
+fn parse_time(iso: &str) -> i64 {
+    let num = |range: std::ops::Range<usize>| -> i64 {
+        iso.get(range).and_then(|s| s.parse().ok()).unwrap_or(0)
+    };
+    let (y, m, d) = (num(0..4), num(5..7), num(8..10));
+    if m == 0 || d == 0 {
+        return 0;
+    }
+    // Days from civil (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    days * 86_400 + num(11..13) * 3600 + num(14..16) * 60 + num(17..19)
+}
+
+fn text(v: &serde_json::Value) -> String {
+    v.as_str().unwrap_or_default().to_string()
+}
+
+fn parse_pull_request(v: &serde_json::Value) -> Option<PullRequest> {
+    Some(PullRequest {
+        number: v["number"].as_u64()?,
+        title: text(&v["title"]),
+        author: text(&v["author"]["login"]),
+        state: text(&v["state"]),
+        draft: v["isDraft"].as_bool().unwrap_or(false),
+        head: text(&v["headRefName"]),
+        base: text(&v["baseRefName"]),
+        created_at: parse_time(v["createdAt"].as_str().unwrap_or_default()),
+    })
+}
+
+fn parse_pull_request_detail(v: &serde_json::Value) -> Option<PullRequestDetail> {
+    let list = |key: &str| v[key].as_array().cloned().unwrap_or_default();
+    let mut events: Vec<PrEvent> = Vec::new();
+    for c in list("commits") {
+        let author = &c["authors"][0];
+        let oid = c["oid"].as_str().unwrap_or_default();
+        events.push(PrEvent {
+            kind: PrEventKind::Commit,
+            author: text(if author["login"].is_string() {
+                &author["login"]
+            } else {
+                &author["name"]
+            }),
+            at: parse_time(c["committedDate"].as_str().unwrap_or_default()),
+            text: format!(
+                "{} {}",
+                &oid[..7.min(oid.len())],
+                text(&c["messageHeadline"])
+            ),
+        });
+    }
+    for c in list("comments") {
+        events.push(PrEvent {
+            kind: PrEventKind::Comment,
+            author: text(&c["author"]["login"]),
+            at: parse_time(c["createdAt"].as_str().unwrap_or_default()),
+            text: text(&c["body"]),
+        });
+    }
+    for r in list("reviews") {
+        let body = text(&r["body"]);
+        let verdict = text(&r["state"]);
+        events.push(PrEvent {
+            kind: PrEventKind::Review,
+            author: text(&r["author"]["login"]),
+            at: parse_time(r["submittedAt"].as_str().unwrap_or_default()),
+            text: if body.is_empty() {
+                verdict
+            } else {
+                format!("{verdict}\n{body}")
+            },
+        });
+    }
+    events.sort_by_key(|e| e.at);
+    Some(PullRequestDetail {
+        summary: parse_pull_request(v)?,
+        body: text(&v["body"]),
+        url: text(&v["url"]),
+        additions: v["additions"].as_u64().unwrap_or(0),
+        deletions: v["deletions"].as_u64().unwrap_or(0),
+        changed_files: v["changedFiles"].as_u64().unwrap_or(0),
+        mergeable: text(&v["mergeable"]),
+        merge_state: text(&v["mergeStateStatus"]),
+        events,
+    })
+}
+
+/// `gh pr …` for the repository behind `origin`, as the account that remote is pinned to
+/// (or gh's default account when it isn't pinned).
+fn gh_pr(origin: &str) -> Result<(Command, String), String> {
+    let slug = repo_slug(origin).ok_or("this repository's origin isn't on GitHub")?;
+    let mut gh = match account_of(origin) {
+        Some(login) => gh_as(login)?,
+        None => gh()?,
+    };
+    gh.arg("pr");
+    Ok((gh, slug))
+}
+
+const PR_FIELDS: &str = "number,title,author,state,isDraft,headRefName,baseRefName,createdAt";
+
+/// The repository's pull requests, newest first, open and closed alike.
+pub fn list_pull_requests(origin: &str) -> Result<Vec<PullRequest>, String> {
+    let (mut gh, slug) = gh_pr(origin)?;
+    gh.args(["list", "--repo", &slug, "--state", "all", "--limit", "100"])
+        .args(["--json", PR_FIELDS]);
+    let json: serde_json::Value =
+        serde_json::from_str(&gh_stdout(gh)?).map_err(|e| e.to_string())?;
+    Ok(json
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(parse_pull_request)
+        .collect())
+}
+
+pub fn pull_request(origin: &str, number: u64) -> Result<PullRequestDetail, String> {
+    let (mut gh, slug) = gh_pr(origin)?;
+    let fields = format!(
+        "{PR_FIELDS},body,url,additions,deletions,changedFiles,mergeable,mergeStateStatus,\
+         commits,comments,reviews"
+    );
+    gh.args([
+        "view",
+        &number.to_string(),
+        "--repo",
+        &slug,
+        "--json",
+        &fields,
+    ]);
+    let json: serde_json::Value =
+        serde_json::from_str(&gh_stdout(gh)?).map_err(|e| e.to_string())?;
+    parse_pull_request_detail(&json).ok_or_else(|| "GitHub returned no pull request".to_string())
+}
+
+/// Merge a pull request with a merge commit. Whatever GitHub answers when it refuses
+/// (conflicts, required reviews, failing checks, no permission) comes back as the error.
+pub fn merge_pull_request(origin: &str, number: u64) -> Result<(), String> {
+    let (mut gh, slug) = gh_pr(origin)?;
+    gh.args(["merge", &number.to_string(), "--repo", &slug, "--merge"]);
+    gh_stdout(gh).map(|_| ())
+}
+
+/// The page for one commit on github.com, when `origin` is a GitHub remote.
+pub fn commit_web_url(origin: &str, sha: &str) -> Option<String> {
+    let path = github_repo_path(origin)?;
+    let path = path
+        .strip_suffix(".git")
+        .unwrap_or(path)
+        .trim_end_matches('/');
+    Some(format!("https://{GITHUB_HOST}/{path}/commit/{sha}"))
+}
+
+/// A commit author's GitHub profile picture, as a local file.
+///
+/// GitHub resolves avatars by commit email (the lookup GitHub Desktop uses); an email it
+/// doesn't know gets its generic identicon. Each email is downloaded once into the user
+/// cache directory and reused from then on. Note this sends the email to GitHub.
+pub fn avatar(email: &str) -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    if email.is_empty() {
+        return None;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    email.to_lowercase().hash(&mut hasher);
+    let dir = cache_dir()?.join("avatars");
+    let stem = format!("{:016x}", hasher.finish());
+    // Stored with the extension matching its real format (the image loader goes by it).
+    for ext in ["png", "jpg", "gif"] {
+        let cached = dir.join(format!("{stem}.{ext}"));
+        if cached.is_file() {
+            return Some(cached);
+        }
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    let escaped: String = email
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    let part = dir.join(format!("{stem}.part"));
+    let fetched = Command::new("curl")
+        .args(["-sfL", "--max-time", "10", "-o"])
+        .arg(&part)
+        .arg(format!(
+            "https://avatars.githubusercontent.com/u/e?email={escaped}&s=64"
+        ))
+        .status()
+        .is_ok_and(|s| s.success());
+    let bytes = std::fs::read(&part).unwrap_or_default();
+    let ext = match bytes.as_slice() {
+        [0x89, b'P', b'N', b'G', ..] => Some("png"),
+        [0xFF, 0xD8, ..] => Some("jpg"),
+        [b'G', b'I', b'F', b'8', ..] => Some("gif"),
+        _ => None,
+    };
+    if let (true, Some(ext)) = (fetched, ext) {
+        let file = dir.join(format!("{stem}.{ext}"));
+        if std::fs::rename(&part, &file).is_ok() {
+            return Some(file);
+        }
+    }
+    let _ = std::fs::remove_file(&part);
+    None
+}
+
+/// Where downloaded things that can always be fetched again live.
+fn cache_dir() -> Option<PathBuf> {
+    Some(directories::BaseDirs::new()?.cache_dir().join("Anano"))
+}
+
+fn repos_cache_file(login: &str) -> Option<PathBuf> {
+    // Logins are [A-Za-z0-9-], but never trust a name into a path.
+    let safe: String = login
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    Some(cache_dir()?.join("repos").join(format!("{safe}.tsv")))
+}
+
+/// The repository list saved by the last successful [`list_repos`] for this account, so
+/// the clone dialog can show something at once and refresh behind it.
+pub fn cached_repos(login: &str) -> Option<Vec<Repo>> {
+    let text = std::fs::read_to_string(repos_cache_file(login)?).ok()?;
+    Some(parse_repos(&text))
 }
 
 /// `true` for `https://[user@]github.com/...` only. Guards the token: it must never be
@@ -389,12 +692,73 @@ mod tests {
     }
 
     #[test]
+    fn commit_web_url_handles_every_github_remote_shape() {
+        for origin in [
+            "https://github.com/o/r.git",
+            "https://me@github.com/o/r",
+            "git@github.com:o/r.git",
+        ] {
+            assert_eq!(
+                commit_web_url(origin, "abc").as_deref(),
+                Some("https://github.com/o/r/commit/abc"),
+                "{origin}"
+            );
+        }
+        assert_eq!(commit_web_url("https://gitlab.com/o/r.git", "abc"), None);
+    }
+
+    #[test]
+    fn pull_request_json_becomes_a_detail_with_its_history_in_order() {
+        assert_eq!(parse_time("1970-01-02T00:00:01Z"), 86_401);
+        assert_eq!(parse_time("2026-09-14T23:16:15Z"), 1_789_427_775);
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"number":6,"title":"T","author":{"login":"me"},"state":"OPEN","isDraft":false,
+            "headRefName":"feat","baseRefName":"main","createdAt":"2026-09-14T23:16:15Z",
+            "body":"hello","url":"https://github.com/o/r/pull/6","additions":4,"deletions":1,
+            "changedFiles":2,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
+            "commits":[{"oid":"abcdef0123","messageHeadline":"do it",
+                "committedDate":"2026-09-14T10:00:00Z","authors":[{"login":"me","name":"Me"}]}],
+            "comments":[{"author":{"login":"you"},"body":"nice","createdAt":"2026-09-15T10:00:00Z"}],
+            "reviews":[{"author":{"login":"you"},"body":"","state":"APPROVED",
+                "submittedAt":"2026-09-14T12:00:00Z"}]}"#,
+        )
+        .unwrap();
+        let pr = parse_pull_request_detail(&json).unwrap();
+        assert_eq!((pr.summary.number, pr.summary.head.as_str()), (6, "feat"));
+        assert_eq!(
+            (pr.mergeable.as_str(), pr.merge_state.as_str()),
+            ("MERGEABLE", "CLEAN")
+        );
+        let kinds: Vec<_> = pr.events.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                PrEventKind::Commit,
+                PrEventKind::Review,
+                PrEventKind::Comment
+            ]
+        );
+        assert_eq!(pr.events[0].text, "abcdef0 do it");
+        assert_eq!(pr.events[1].text, "APPROVED");
+        assert_eq!(
+            repo_slug("https://me@github.com/o/r.git").as_deref(),
+            Some("o/r")
+        );
+    }
+
+    #[test]
     fn parse_repos_reads_the_private_flag_and_full_name() {
         assert_eq!(
             parse_repos("true\tme/secret\nfalse\torg/open\n"),
             vec![
-                Repo { name: "me/secret".into(), private: true },
-                Repo { name: "org/open".into(), private: false },
+                Repo {
+                    name: "me/secret".into(),
+                    private: true
+                },
+                Repo {
+                    name: "org/open".into(),
+                    private: false
+                },
             ]
         );
     }

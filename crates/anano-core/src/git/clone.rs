@@ -56,10 +56,28 @@ pub fn init_repo_with(
     Ok(dest)
 }
 
+/// `user.name` from the user's git config (for the copyright line of a new LICENSE).
+pub fn author_name() -> Option<String> {
+    git2::Config::open_default()
+        .ok()?
+        .get_string("user.name")
+        .ok()
+}
+
 /// The URL of `origin`, if the repository has one.
 pub fn origin_url(repo_path: &Path) -> Option<String> {
     let repo = Repository::discover(repo_path).ok()?;
     repo.find_remote("origin").ok()?.url().map(str::to_string)
+}
+
+/// When the repository was last fetched: the mtime of `FETCH_HEAD`, which every fetch
+/// rewrites whether it came from this app or from `git` in a terminal.
+pub fn last_fetched(repo_path: &Path) -> Option<std::time::SystemTime> {
+    let repo = Repository::discover(repo_path).ok()?;
+    std::fs::metadata(repo.path().join("FETCH_HEAD"))
+        .ok()?
+        .modified()
+        .ok()
 }
 
 /// Point `origin` at `url` (adding the remote if the repository has none yet).
@@ -97,9 +115,8 @@ mod tests {
         if Repository::open(&dest).unwrap().signature().is_ok()
             && git2::Config::open_default().is_ok_and(|c| c.get_string("user.name").is_ok())
         {
-            let made =
-                init_repo_with(parent.path(), "fresh", &[("README.md", "# fresh\n".into())])
-                    .unwrap();
+            let made = init_repo_with(parent.path(), "fresh", &[("README.md", "# fresh\n".into())])
+                .unwrap();
             let repo = Repository::open(&made).unwrap();
             let head = repo.head().unwrap().peel_to_commit().unwrap();
             assert_eq!(head.summary(), Some("Initial commit"));

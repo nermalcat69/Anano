@@ -3,11 +3,7 @@
 //! Phase 1 有意不做 HTTP 版本里的多行分页——一次同时开十几个仓库并不常见，
 //! 装不下时靠系统的横向滚动（触控板 / 滚轮）就够了，犯不上再搭一套分页算法。
 
-use gpui_kit::component::{
-    ActiveTheme, Icon, IconName, Sizable,
-    button::{Button, ButtonVariants},
-    h_flex,
-};
+use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, button::ButtonVariants, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, MouseButton,
@@ -28,6 +24,10 @@ impl Workspace {
 
         let mut children = Vec::with_capacity(tabs.len());
         for (ix, (name, path)) in tabs.into_iter().enumerate() {
+            // A repository whose tab was closed is still in the app, just not up here.
+            if !self.is_tab(ix) {
+                continue;
+            }
             children.push(self.render_tab(ix, name, path, ix == active, cx));
         }
 
@@ -43,7 +43,7 @@ impl Workspace {
             .items_start()
             .child(
                 div().flex_none().px_1().py_1().child(
-                    Button::new("open-repo")
+                    crate::ui::button("open-repo")
                         .outline()
                         .small()
                         .icon(Icon::empty().path(ICON_FOLDER_GIT))
@@ -104,14 +104,14 @@ impl Workspace {
             })
             .child(div().flex_1().min_w_0().text_sm().truncate().child(name))
             .child(
-                Button::new(("close-tab", ix))
+                crate::ui::button(("close-tab", ix))
                     .ghost()
                     .xsmall()
                     .icon(IconName::Close)
                     .tooltip(tr!("tab.close"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        this.close_repo(ix, window, cx)
+                        this.close_tab(ix, cx)
                     })),
             )
             .when(selected, |d| {

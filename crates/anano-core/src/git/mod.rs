@@ -13,9 +13,12 @@ pub mod repo;
 pub mod status;
 
 pub use branch::{
-    checkout_branch, create_branch, current_branch_name, delete_branch, list_branches,
+    checkout_branch, create_branch, current_branch_name, delete_branch, head_branch, list_branches,
+    switch_branch,
 };
-pub use clone::{clone_repo, init_repo, init_repo_with, origin_url, set_origin};
+pub use clone::{
+    author_name, clone_repo, init_repo, init_repo_with, last_fetched, origin_url, set_origin,
+};
 pub use diff::{DiffLine, DiffView, LineKind, diff_commit, diff_file};
 pub use error::GitError;
 pub use lfs::{LfsOp, LfsSync, is_lfs_enabled, is_lfs_installed, is_lfs_pointer};

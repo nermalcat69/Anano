@@ -24,6 +24,19 @@ pub struct OpenRepo {
     pub lfs_status: Option<LfsSync>,
     /// `origin`'s URL; refreshed together with the branch list.
     pub origin: Option<String>,
+    pub last_fetched: Option<std::time::SystemTime>,
+    /// The branch `HEAD` names, known even before the first commit exists.
+    pub head_branch: Option<String>,
+    /// Set when the repository is opened or switched to; cleared by the automatic fetch
+    /// that follows (see `Workspace::maybe_auto_fetch`).
+    /// Whether `origin` / `head_branch` / `last_fetched` have been read from git yet.
+    /// Whether it has a tab in the tab strip. Closing a tab clears this and nothing else:
+    /// the repository stays in the app (and in the repository list) until it is removed.
+    pub in_tabs: bool,
+    pub facts_loaded: bool,
+    pub needs_fetch: bool,
+    /// The sync in flight was started by the app, not the user: if it fails, stay quiet.
+    pub quiet_sync: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,12 +61,35 @@ impl OpenRepo {
             syncing: None,
             lfs_status: None,
             origin: None,
+            last_fetched: None,
+            head_branch: None,
+            in_tabs: true,
+            facts_loaded: false,
+            needs_fetch: true,
+            quiet_sync: false,
         }
     }
 
     /// 当前签出的本地分支，找不到（比如还没刷新过 / 分离 HEAD）时为 `None`。
     pub fn current_branch(&self) -> Option<&Branch> {
         self.branches.iter().find(|b| b.is_head)
+    }
+
+    /// What to call the current branch in the UI. `None` means "say Detached HEAD".
+    ///
+    /// In order: the checked-out branch from the loaded branch list; the branch `HEAD`
+    /// names (known even in a repository with no commits yet); and, until git has been
+    /// read at all, the branch remembered from last time, so there is a name on screen
+    /// immediately. Only a repository that has been read and whose `HEAD` points at a
+    /// commit instead of a branch is called detached.
+    pub fn branch_label(&self) -> Option<String> {
+        self.current_branch()
+            .map(|b| b.name.clone())
+            .or_else(|| self.head_branch.clone())
+            .or_else(|| {
+                let unread = !self.facts_loaded;
+                unread.then(|| self.entry.last_branch.clone().unwrap_or_else(|| "…".into()))
+            })
     }
 
     pub fn staged(&self) -> impl Iterator<Item = &FileStatus> {

@@ -13,6 +13,14 @@ pub struct RepoEntry {
     pub display_name: String,
     /// Unix 毫秒；目前只用于展示/排序，phase 1 不做「最近」列表。
     pub last_opened: i64,
+    /// The branch this repository was on when last seen. A cache, so the UI can name the
+    /// branch the instant a repository is shown instead of waiting for git to be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_branch: Option<String>,
+    /// `origin`'s URL when last seen; the repository list groups by its owner without
+    /// having to open every repository first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_origin: Option<String>,
 }
 
 impl RepoEntry {
@@ -24,6 +32,8 @@ impl RepoEntry {
             path,
             display_name,
             last_opened: now_ms(),
+            last_branch: None,
+            last_origin: None,
         }
     }
 }
@@ -66,6 +76,8 @@ pub struct Branch {
     pub upstream: Option<String>,
     /// 相对上游的 (ahead, behind)；只有配了上游的本地分支才算，算起来不贵就顺手带上。
     pub ahead_behind: Option<(usize, usize)>,
+    /// Commit time (Unix seconds) of the branch tip, for "2 months ago" in the branch list.
+    pub last_commit_time: Option<i64>,
 }
 
 /// 一条提交记录（`git log` 里的一行），供历史列表展示。
@@ -76,6 +88,8 @@ pub struct CommitInfo {
     /// 提交信息的第一行。
     pub summary: String,
     pub author: String,
+    /// Author email; the key GitHub profile pictures are looked up by.
+    pub email: String,
     /// 作者时间，Unix 秒。
     pub time: i64,
 }

@@ -5,11 +5,15 @@
 use std::rc::Rc;
 
 use anano_core::git::{DiffLine, DiffView, LineKind};
-use gpui_kit::component::{ActiveTheme, IconName, Sizable, button::Button, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme, IconName, Sizable,
+    button::{Button, ButtonVariants},
+    h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    SharedString, Styled, div, px, uniform_list,
+    SharedString, StatefulInteractiveElement, Styled, div, px, uniform_list,
 };
 
 use crate::i18n::tr;
@@ -17,6 +21,7 @@ use crate::state::workspace::{Selected, Workspace};
 
 const ROW_HEIGHT: f32 = 20.;
 const GUTTER_WIDTH: f32 = 44.;
+const FILES_WIDTH: f32 = 240.;
 
 fn diff_row(line: &DiffLine, cx: &App) -> AnyElement {
     let theme = cx.theme();
@@ -73,7 +78,7 @@ fn diff_row(line: &DiffLine, cx: &App) -> AnyElement {
 impl Workspace {
     fn render_open_in_nermal(&self, cx: &mut Context<Self>) -> Option<Button> {
         self.nermal_available.then(|| {
-            Button::new("open-in-nermal")
+            crate::ui::button("open-in-nermal")
                 .outline()
                 .small()
                 .icon(IconName::ExternalLink)
@@ -116,6 +121,16 @@ impl Workspace {
             pane.items_center().justify_center().gap_1().text_sm()
         };
         let muted = cx.theme().muted_foreground;
+        if let Some(busy) = self.busy.clone() {
+            return centered(pane).gap_3().child(busy).child(
+                gpui_kit::component::progress::Progress::new("busy-progress")
+                    .loading(true)
+                    .w(px(280.)),
+            );
+        }
+        if let Some(pulls) = &self.pulls {
+            return pane.child(self.render_pull_requests(pulls, cx));
+        }
         let Some(repo) = self.active_repo() else {
             return centered(pane)
                 .text_color(muted)
@@ -137,6 +152,46 @@ impl Workspace {
         };
 
         let (title, subtitle) = self.diff_heading(selected);
+        // A commit gets GitHub Desktop's header: who made it, and its SHA with a copy button.
+        let commit = match selected {
+            Selected::Commit(id) => repo.commits.iter().find(|c| &c.id == id),
+            Selected::File { .. } => None,
+        };
+        let byline = commit.map(|c| {
+            let picture = self.avatars.get(&c.email).and_then(|p| p.as_ref());
+            let short: SharedString = c.id[..7.min(c.id.len())].to_string().into();
+            let full = c.id.clone();
+            h_flex()
+                .flex_none()
+                .gap_2()
+                .items_center()
+                .text_xs()
+                .text_color(muted)
+                .child(crate::ui::avatar(picture, &c.author, px(18.), cx))
+                .child(c.author.clone())
+                .child(
+                    div()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .child(short),
+                )
+                .child(
+                    crate::ui::button("copy-sha")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Copy)
+                        .tooltip(tr!("repo.history.copy_sha"))
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                full.clone(),
+                            ));
+                        }),
+                )
+        });
+        let subtitle = if byline.is_some() {
+            SharedString::default()
+        } else {
+            subtitle
+        };
         let truncated = matches!(&self.diff, Some(Ok(view)) if view.truncated);
         let header = h_flex()
             .flex_none()
@@ -167,6 +222,7 @@ impl Workspace {
                             .text_color(muted)
                             .child(subtitle),
                     )
+                    .children(byline)
                     .when(truncated, |h| {
                         h.child(
                             div()
@@ -195,8 +251,46 @@ impl Workspace {
             Some(Err(err)) => message(err.clone().into(), cx.theme().danger),
             Some(Ok(view)) if view.lines.is_empty() => message(tr!("repo.diff.empty"), muted),
             Some(Ok(view)) => {
+                // For a commit: the files it touched down the left; clicking one jumps the
+                // diff to that file's section.
+                let files = commit.is_some().then(|| {
+                    let entries: Vec<(usize, &DiffLine)> = view
+                        .lines
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, line)| line.kind == LineKind::File)
+                        .collect();
+                    let hover = cx.theme().list_hover;
+                    v_flex()
+                        .id("changed-files")
+                        .flex_none()
+                        .w(px(FILES_WIDTH))
+                        .h_full()
+                        .border_r_1()
+                        .border_color(cx.theme().border)
+                        .overflow_y_scroll()
+                        .child(div().px_3().py_2().text_sm().text_color(muted).child(tr!(
+                            "repo.history.changed_files",
+                            count = entries.len().to_string()
+                        )))
+                        .children(entries.into_iter().map(|(ix, line)| {
+                            let scroll = self.diff_scroll.clone();
+                            div()
+                                .id(("changed-file", ix))
+                                .px_3()
+                                .py_1p5()
+                                .text_sm()
+                                .truncate()
+                                .cursor_pointer()
+                                .hover(move |style| style.bg(hover))
+                                .child(line.text.clone())
+                                .on_click(move |_, _, _| {
+                                    scroll.scroll_to_item_strict(ix, gpui_kit::ScrollStrategy::Top)
+                                })
+                        }))
+                });
                 let view: Rc<DiffView> = view.clone();
-                uniform_list("diff-lines", view.lines.len(), move |range, _, cx| {
+                let lines = uniform_list("diff-lines", view.lines.len(), move |range, _, cx| {
                     view.lines[range]
                         .iter()
                         .map(|line| diff_row(line, cx))
@@ -204,8 +298,15 @@ impl Workspace {
                 })
                 .track_scroll(&self.diff_scroll)
                 .flex_1()
-                .min_h_0()
-                .into_any_element()
+                .min_w_0()
+                .h_full();
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .items_start()
+                    .children(files)
+                    .child(lines)
+                    .into_any_element()
             }
         };
         pane.child(header).child(body)

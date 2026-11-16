@@ -1249,6 +1249,52 @@ settings:
     ja: 更新の前に Anano を「アプリケーション」フォルダへ移動してください
 
 # 仓库（打开、侧栏 / 标签栏列表、git status 展示）
+time:
+  just_now:
+    en: just now
+    zh-CN: 刚刚
+    ja: たった今
+  minute_ago:
+    en: "%{count} minute ago"
+    zh-CN: "%{count} 分钟前"
+    ja: "%{count} 分前"
+  minutes_ago:
+    en: "%{count} minutes ago"
+    zh-CN: "%{count} 分钟前"
+    ja: "%{count} 分前"
+  hour_ago:
+    en: "%{count} hour ago"
+    zh-CN: "%{count} 小时前"
+    ja: "%{count} 時間前"
+  hours_ago:
+    en: "%{count} hours ago"
+    zh-CN: "%{count} 小时前"
+    ja: "%{count} 時間前"
+  day_ago:
+    en: "%{count} day ago"
+    zh-CN: "%{count} 天前"
+    ja: "%{count} 日前"
+  days_ago:
+    en: "%{count} days ago"
+    zh-CN: "%{count} 天前"
+    ja: "%{count} 日前"
+  month_ago:
+    en: "%{count} month ago"
+    zh-CN: "%{count} 个月前"
+    ja: "%{count} か月前"
+  months_ago:
+    en: "%{count} months ago"
+    zh-CN: "%{count} 个月前"
+    ja: "%{count} か月前"
+  year_ago:
+    en: "%{count} year ago"
+    zh-CN: "%{count} 年前"
+    ja: "%{count} 年前"
+  years_ago:
+    en: "%{count} years ago"
+    zh-CN: "%{count} 年前"
+    ja: "%{count} 年前"
+
 repo:
   open:
     en: Open Repository…
@@ -1349,6 +1395,22 @@ repo:
       zh-CN: 提交并推送
       ja: コミットして push
   history:
+    changed_files:
+      en: "%{count} changed files"
+      zh-CN: "%{count} 个文件有改动"
+      ja: "%{count} 個のファイルを変更"
+    copy_sha:
+      en: Copy SHA
+      zh-CN: 复制 SHA
+      ja: SHA をコピー
+    view_on_github:
+      en: View on GitHub
+      zh-CN: 在 GitHub 上查看
+      ja: GitHub で表示
+    branch_from_commit:
+      en: Create Branch from Commit…
+      zh-CN: 从此提交创建分支…
+      ja: このコミットからブランチを作成…
     title:
       en: History
       zh-CN: 历史记录
@@ -1358,6 +1420,70 @@ repo:
       zh-CN: 尚无提交记录
       ja: コミットはまだありません
   branch:
+    filter:
+      en: Filter
+      zh-CN: 筛选
+      ja: フィルター
+    default_section:
+      en: Default Branch
+      zh-CN: 默认分支
+      ja: デフォルトブランチ
+    other_section:
+      en: Other Branches
+      zh-CN: 其他分支
+      ja: その他のブランチ
+    new_button:
+      en: New Branch
+      zh-CN: 新建分支
+      ja: 新しいブランチ
+    create_title:
+      en: Create a Branch
+      zh-CN: 创建分支
+      ja: ブランチを作成
+    create_action:
+      en: Create Branch
+      zh-CN: 创建分支
+      ja: ブランチを作成
+    name:
+      en: Name
+      zh-CN: 名称
+      ja: 名前
+    based_on_branch:
+      en: "Your new branch will be based on your currently checked out branch (%{name})."
+      zh-CN: "新分支将基于当前检出的分支（%{name}）。"
+      ja: "新しいブランチは現在チェックアウト中のブランチ（%{name}）を元に作成されます。"
+    based_on_commit:
+      en: "Your new branch will be based on commit %{sha}."
+      zh-CN: "新分支将基于提交 %{sha}。"
+      ja: "新しいブランチはコミット %{sha} を元に作成されます。"
+    switch_title:
+      en: Switch Branch
+      zh-CN: 切换分支
+      ja: ブランチを切り替え
+    switch_question:
+      en: You have changes on this branch. What would you like to do with them?
+      zh-CN: 此分支上有未提交的改动，你想如何处理？
+      ja: このブランチに変更があります。どうしますか？
+    leave_title:
+      en: "Leave my changes on %{name}"
+      zh-CN: "将我的改动留在 %{name}"
+      ja: "変更を %{name} に残す"
+    leave_desc:
+      en: Your in-progress work will be stashed on this branch for you to return to later
+      zh-CN: 进行中的工作会暂存在此分支上，回来时自动恢复
+      ja: 作業中の変更はこのブランチにスタッシュされ、戻ったときに復元されます
+    bring_title:
+      en: "Bring my changes to %{name}"
+      zh-CN: "将我的改动带到 %{name}"
+      ja: "変更を %{name} に持っていく"
+    bring_desc:
+      en: Your in-progress work will follow you to the new branch
+      zh-CN: 进行中的工作会跟随你到新分支
+      ja: 作業中の変更は新しいブランチに引き継がれます
+    switch_action:
+      en: Switch Branch
+      zh-CN: 切换分支
+      ja: ブランチを切り替え
     switch:
       en: "Switch branch: %{name}"
       zh-CN: "切换分支：%{name}"
@@ -1470,6 +1596,14 @@ repo:
       en: Filter repositories
       zh-CN: 筛选仓库
       ja: リポジトリを検索
+    remove:
+      en: Remove from Anano (keeps the files)
+      zh-CN: 从 Anano 中移除（保留文件）
+      ja: Anano から削除（ファイルは残ります）
+    other:
+      en: Other
+      zh-CN: 其他
+      ja: その他
     recent:
       en: Recent
       zh-CN: 最近打开
@@ -1494,9 +1628,229 @@ repo:
       en: No branch
       zh-CN: 无分支
       ja: ブランチなし
-  clone:
+  pulls:
     title:
-      en: Clone Repository
+      en: Pull Requests
+      zh-CN: 拉取请求
+      ja: プルリクエスト
+    button_hint:
+      en: Review and merge
+      zh-CN: 查看与合并
+      ja: 確認とマージ
+    loading:
+      en: Loading pull requests…
+      zh-CN: 正在加载拉取请求…
+      ja: プルリクエストを読み込み中…
+    loading_one:
+      en: Loading pull request…
+      zh-CN: 正在加载拉取请求…
+      ja: プルリクエストを読み込み中…
+    none:
+      en: This repository has no pull requests
+      zh-CN: 此仓库没有拉取请求
+      ja: このリポジトリにプルリクエストはありません
+    no_origin:
+      en: This repository has no GitHub remote
+      zh-CN: 此仓库没有 GitHub 远程
+      ja: このリポジトリには GitHub のリモートがありません
+    pick_one:
+      en: Select a pull request to read it
+      zh-CN: 选择一个拉取请求以查看
+      ja: プルリクエストを選択してください
+    no_description:
+      en: No description provided.
+      zh-CN: 未提供描述。
+      ja: 説明はありません。
+    history:
+      en: History
+      zh-CN: 历史
+      ja: 履歴
+    wants_to_merge:
+      en: "%{author} wants to merge %{head} into %{base}"
+      zh-CN: "%{author} 想将 %{head} 合并到 %{base}"
+      ja: "%{author} が %{head} を %{base} にマージしようとしています"
+    merge:
+      en: Merge pull request
+      zh-CN: 合并拉取请求
+      ja: プルリクエストをマージ
+    merge_title:
+      en: "Merge pull request #%{number}?"
+      zh-CN: "合并拉取请求 #%{number}？"
+      ja: "プルリクエスト #%{number} をマージしますか？"
+    state:
+      open:
+        en: "Open"
+        zh-CN: "开放"
+        ja: "オープン"
+      draft:
+        en: "Draft"
+        zh-CN: "草稿"
+        ja: "ドラフト"
+      merged:
+        en: "Merged"
+        zh-CN: "已合并"
+        ja: "マージ済み"
+      closed:
+        en: "Closed"
+        zh-CN: "已关闭"
+        ja: "クローズ"
+    event:
+      commit:
+        en: "committed"
+        zh-CN: "提交了"
+        ja: "がコミット"
+      comment:
+        en: "commented"
+        zh-CN: "评论了"
+        ja: "がコメント"
+      review:
+        en: "reviewed"
+        zh-CN: "审查了"
+        ja: "がレビュー"
+    verdict:
+      merged:
+        en: "This pull request has been merged."
+        zh-CN: "此拉取请求已合并。"
+        ja: "このプルリクエストはマージ済みです。"
+      closed:
+        en: "This pull request was closed without merging."
+        zh-CN: "此拉取请求已关闭，未合并。"
+        ja: "このプルリクエストはマージされずにクローズされました。"
+      draft:
+        en: "This pull request is still a draft and can't be merged yet."
+        zh-CN: "此拉取请求仍是草稿，暂时无法合并。"
+        ja: "このプルリクエストはドラフトのため、まだマージできません。"
+      conflicts:
+        en: "This branch has conflicts that must be resolved before merging."
+        zh-CN: "此分支存在冲突，需解决后才能合并。"
+        ja: "このブランチにはコンフリクトがあり、解決するまでマージできません。"
+      blocked:
+        en: "Merging is blocked: required reviews or checks have not passed yet."
+        zh-CN: "合并被阻止：所需的审查或检查尚未通过。"
+        ja: "マージはブロックされています：必要なレビューまたはチェックが完了していません。"
+      behind:
+        en: "This branch is out of date with the base branch and must be updated before merging."
+        zh-CN: "此分支落后于基础分支，需更新后才能合并。"
+        ja: "このブランチはベースブランチより古いため、更新するまでマージできません。"
+      unstable:
+        en: "This branch can be merged, but some checks have not passed."
+        zh-CN: "此分支可以合并，但部分检查未通过。"
+        ja: "マージできますが、一部のチェックが通っていません。"
+      clean:
+        en: "This branch has no conflicts with the base branch and can be merged."
+        zh-CN: "此分支与基础分支没有冲突，可以合并。"
+        ja: "このブランチはベースブランチとコンフリクトがなく、マージできます。"
+      unknown:
+        en: "GitHub hasn't worked out yet whether this can be merged. Refresh in a moment."
+        zh-CN: "GitHub 尚未计算出能否合并，请稍后刷新。"
+        ja: "GitHub がマージ可能かどうかをまだ判定していません。少し待って更新してください。"
+  toolbar:
+    current_branch:
+      en: Current Branch
+      zh-CN: 当前分支
+      ja: 現在のブランチ
+    fetch:
+      en: Fetch origin
+      zh-CN: 获取 origin
+      ja: origin をフェッチ
+    pull:
+      en: Pull origin
+      zh-CN: 拉取 origin
+      ja: origin をプル
+    push:
+      en: Push origin
+      zh-CN: 推送 origin
+      ja: origin へプッシュ
+    publish_hint:
+      en: Publish this branch to GitHub
+      zh-CN: 将此分支发布到 GitHub
+      ja: このブランチを GitHub に公開
+    publish:
+      en: Publish branch
+      zh-CN: 发布分支
+      ja: ブランチを公開
+    working:
+      en: Hang on…
+      zh-CN: 请稍候…
+      ja: お待ちください…
+    never_fetched:
+      en: Never fetched
+      zh-CN: 从未获取
+      ja: 未フェッチ
+    last_fetched:
+      en: "Last fetched %{when}"
+      zh-CN: "上次获取：%{when}"
+      ja: "最終フェッチ：%{when}"
+    just_now:
+      en: just now
+      zh-CN: 刚刚
+      ja: たった今
+    minutes_ago:
+      en: "%{count}m ago"
+      zh-CN: "%{count} 分钟前"
+      ja: "%{count} 分前"
+    hours_ago:
+      en: "%{count}hr ago"
+      zh-CN: "%{count} 小时前"
+      ja: "%{count} 時間前"
+    days_ago:
+      en: "%{count}d ago"
+      zh-CN: "%{count} 天前"
+      ja: "%{count} 日前"
+  busy:
+    cloning:
+      en: "Cloning %{name}…"
+      zh-CN: "正在克隆 %{name}…"
+      ja: "%{name} をクローン中…"
+    creating:
+      en: "Creating %{name}…"
+      zh-CN: "正在创建 %{name}…"
+      ja: "%{name} を作成中…"
+  dialog:
+    local_path:
+      en: Local Path
+      zh-CN: 本地路径
+      ja: ローカルパス
+    choose:
+      en: Choose…
+      zh-CN: 选择…
+      ja: 選択…
+    choose_prompt:
+      en: Choose
+      zh-CN: 选择
+      ja: 選択
+  add:
+    title:
+      en: Add Local Repository
+      zh-CN: 添加本地仓库
+      ja: ローカルリポジトリを追加
+    action:
+      en: Add Repository
+      zh-CN: 添加仓库
+      ja: リポジトリを追加
+  clone:
+    filter_placeholder:
+      en: Filter your repositories
+      zh-CN: 筛选你的仓库
+      ja: リポジトリを絞り込む
+    your_repos:
+      en: Your Repositories
+      zh-CN: 你的仓库
+      ja: あなたのリポジトリ
+    refresh:
+      en: Refresh the list from GitHub
+      zh-CN: 从 GitHub 刷新列表
+      ja: GitHub から一覧を更新
+    no_match:
+      en: No repository matches that name
+      zh-CN: 没有匹配该名称的仓库
+      ja: その名前に一致するリポジトリはありません
+    url_label:
+      en: Repository URL
+      zh-CN: 仓库地址
+      ja: リポジトリの URL
+    title:
+      en: Clone a Repository
       zh-CN: 克隆仓库
       ja: リポジトリをクローン
     url_placeholder:
@@ -1524,26 +1878,58 @@ repo:
       zh-CN: "克隆失败：%{error}"
       ja: "クローンに失敗しました：%{error}"
   create:
+    name:
+      en: Name
+      zh-CN: 名称
+      ja: 名前
+    description:
+      en: Description
+      zh-CN: 描述
+      ja: 説明
+    readme:
+      en: Initialize this repository with a README
+      zh-CN: 使用 README 初始化此仓库
+      ja: README でこのリポジトリを初期化する
+    gitignore:
+      en: Git Ignore
+      zh-CN: Git 忽略
+      ja: Git Ignore
+    license:
+      en: License
+      zh-CN: 许可证
+      ja: ライセンス
+    none:
+      en: None
+      zh-CN: 无
+      ja: なし
+    local_only:
+      en: Pick an account to also create it on GitHub. Otherwise it stays on this computer.
+      zh-CN: 选择一个账号可同时在 GitHub 上创建，否则仅保存在本机。
+      ja: アカウントを選ぶと GitHub にも作成します。選ばなければこのコンピューターだけに作成されます。
+    partial:
+      en: "Repository created, but: %{error}"
+      zh-CN: "仓库已创建，但：%{error}"
+      ja: "リポジトリは作成されましたが：%{error}"
     title:
-      en: Create New Repository
+      en: Create a New Repository
       zh-CN: 新建仓库
       ja: 新しいリポジトリを作成
     name_placeholder:
-      en: Repository name
+      en: repository name
       zh-CN: 仓库名称
       ja: リポジトリ名
     account:
-      en: "Also create on GitHub as:"
-      zh-CN: "同时在 GitHub 上创建，账号："
-      ja: "GitHub にも作成（アカウント）："
+      en: Create on GitHub as
+      zh-CN: 在 GitHub 上创建，账号
+      ja: GitHub に作成（アカウント）
     visibility:
       en: "Visibility:"
       zh-CN: "可见性："
       ja: "公開範囲："
     private:
-      en: Private
-      zh-CN: 私有
-      ja: 非公開
+      en: Keep this code private
+      zh-CN: 将此代码设为私有
+      ja: このコードを非公開にする
     public:
       en: Public
       zh-CN: 公开

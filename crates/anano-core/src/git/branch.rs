@@ -47,12 +47,18 @@ pub fn list_branches(repo_path: &Path) -> Result<Vec<Branch>, GitError> {
             None
         };
 
+        let last_commit_time = branch
+            .get()
+            .peel_to_commit()
+            .ok()
+            .map(|c| c.time().seconds());
         out.push(Branch {
             name: name.to_string(),
             is_head,
             is_remote,
             upstream,
             ahead_behind,
+            last_commit_time,
         });
     }
     Ok(out)
@@ -66,6 +72,19 @@ pub fn current_branch_name(repo_path: &Path) -> Result<Option<String>, GitError>
         .is_branch()
         .then(|| head.shorthand().map(str::to_string))
         .flatten())
+}
+
+/// The branch `HEAD` names, read from the symbolic ref itself rather than by resolving it.
+///
+/// That distinction matters for a repository with no commits yet: `HEAD` already says
+/// `refs/heads/main`, but there is no commit for it to resolve to, so [`current_branch_name`]
+/// errors and the branch list is empty. Only a genuinely detached `HEAD` gives `None` here.
+pub fn head_branch(repo_path: &Path) -> Option<String> {
+    let repo = open(repo_path).ok()?;
+    let head = repo.find_reference("HEAD").ok()?;
+    head.symbolic_target()?
+        .strip_prefix("refs/heads/")
+        .map(str::to_string)
 }
 
 /// 新建分支；`from` 是提交号 / 分支名等 revspec，`None` 表示从当前 `HEAD` 开始。
@@ -102,6 +121,49 @@ pub fn checkout_branch(repo_path: &Path, name: &str) -> Result<(), GitError> {
             repo.set_head_detached(object.id())
                 .map_err(GitError::Branch)?;
         }
+    }
+    Ok(())
+}
+
+/// The stash message that marks "work left behind on `branch`" (see [`switch_branch`]).
+fn stash_marker(branch: &str) -> String {
+    format!("anano: changes left on {branch}")
+}
+
+/// Switch branches the way GitHub Desktop's "Switch Branch" dialog offers.
+///
+/// - `leave_changes == false`: plain safe checkout; uncommitted work comes along (and the
+///   switch is refused, untouched, if it would be overwritten).
+/// - `leave_changes == true`: stash the uncommitted work under the branch being left, then
+///   switch with a clean tree.
+///
+/// Either way, arriving on a branch that has work stashed this way brings that work back,
+/// so "leave my changes on main" means they are there again the next time you're on main.
+pub fn switch_branch(repo_path: &Path, name: &str, leave_changes: bool) -> Result<(), GitError> {
+    let mut repo = open(repo_path)?;
+    if leave_changes && let Some(current) = current_branch_name(repo_path)? {
+        let signature = repo.signature().map_err(GitError::Branch)?;
+        let flags = git2::StashFlags::INCLUDE_UNTRACKED;
+        match repo.stash_save(&signature, &stash_marker(&current), Some(flags)) {
+            Ok(_) => {}
+            // Nothing to stash is not a failure, just nothing to leave behind.
+            Err(e) if e.code() == git2::ErrorCode::NotFound => {}
+            Err(e) => return Err(GitError::Branch(e)),
+        }
+    }
+    checkout_branch(repo_path, name)?;
+
+    let marker = stash_marker(name);
+    let mut left_here = None;
+    repo.stash_foreach(|index, message, _| {
+        if message.ends_with(&marker) {
+            left_here = Some(index);
+        }
+        left_here.is_none()
+    })
+    .map_err(GitError::Branch)?;
+    if let Some(index) = left_here {
+        repo.stash_pop(index, None).map_err(GitError::Branch)?;
     }
     Ok(())
 }
@@ -208,5 +270,84 @@ mod tests {
             current_branch_name(dir.path()).unwrap().as_deref(),
             Some("main")
         );
+    }
+
+    #[test]
+    fn leaving_changes_stashes_them_and_coming_back_restores_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(p)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "a@b.c"]);
+        git(&["config", "user.name", "test"]);
+        std::fs::write(p.join("a.txt"), "one\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        create_branch(p, "feature", None).unwrap();
+
+        // Work in progress on main: an edit and a brand new file.
+        std::fs::write(p.join("a.txt"), "edited\n").unwrap();
+        std::fs::write(p.join("new.txt"), "wip\n").unwrap();
+
+        switch_branch(p, "feature", true).unwrap();
+        assert_eq!(current_branch_name(p).unwrap().as_deref(), Some("feature"));
+        assert_eq!(std::fs::read_to_string(p.join("a.txt")).unwrap(), "one\n");
+        assert!(!p.join("new.txt").exists(), "left-behind work followed us");
+
+        switch_branch(p, "main", false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("a.txt")).unwrap(),
+            "edited\n"
+        );
+        assert!(
+            p.join("new.txt").exists(),
+            "left-behind work wasn't restored"
+        );
+
+        // "Bring my changes": they come along and nothing is stashed.
+        switch_branch(p, "feature", false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("a.txt")).unwrap(),
+            "edited\n"
+        );
+    }
+
+    #[test]
+    fn head_branch_is_known_before_the_first_commit_and_none_when_detached() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(p)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        // No commits yet: nothing to resolve, but HEAD still names the branch.
+        assert!(current_branch_name(p).is_err());
+        assert_eq!(head_branch(p).as_deref(), Some("main"));
+
+        git(&["config", "user.email", "a@b.c"]);
+        git(&["config", "user.name", "test"]);
+        std::fs::write(p.join("a.txt"), "one\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        assert_eq!(head_branch(p).as_deref(), Some("main"));
+
+        git(&["checkout", "-q", "--detach"]);
+        assert_eq!(head_branch(p), None);
     }
 }

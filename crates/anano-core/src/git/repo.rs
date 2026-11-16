@@ -121,6 +121,7 @@ pub fn recent_commits(repo_path: &Path, limit: usize) -> Result<Vec<CommitInfo>,
             id: oid.to_string(),
             summary: commit.summary().unwrap_or("").to_string(),
             author: commit.author().name().unwrap_or("").to_string(),
+            email: commit.author().email().unwrap_or("").to_string(),
             time: commit.time().seconds(),
         });
     }
