@@ -1108,11 +1108,11 @@ settings:
     zh-CN: Git
     ja: Git
   push_on_commit:
-    en: Push automatically after committing
+    en: Commit and push with one button
     zh-CN: 提交后自动推送
     ja: コミット後に自動で push する
   push_on_commit_desc:
-    en: Sends the commit to the current branch's remote right after it's made
+    en: The Commit button becomes "Commit & Push" and sends the commit to the remote right after it's made
     zh-CN: 提交完成后立即推送到当前分支对应的远程
     ja: コミット直後に現在のブランチのリモートへ push します
   timeout:
@@ -1344,6 +1344,10 @@ repo:
       en: Commit
       zh-CN: 提交
       ja: コミット
+    commit_and_push:
+      en: Commit & Push
+      zh-CN: 提交并推送
+      ja: コミットして push
   history:
     title:
       en: History
@@ -1387,6 +1391,14 @@ repo:
       zh-CN: "删除 %{name}"
       ja: "%{name} を削除"
   sync:
+    account:
+      en: Account
+      zh-CN: 账号
+      ja: アカウント
+    account_tooltip:
+      en: GitHub account this repository fetches and pushes as
+      zh-CN: 此仓库拉取与推送所使用的 GitHub 账号
+      ja: このリポジトリの fetch / push に使う GitHub アカウント
     fetch:
       en: Fetch
       zh-CN: 获取

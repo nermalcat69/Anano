@@ -971,13 +971,16 @@ impl Workspace {
         let id = repo.entry.id;
         cx.notify();
 
+        let origin_task = bridge::origin(cx, path.clone());
         let task = bridge::branches(cx, path);
         cx.spawn(async move |ws, cx| {
             let result = task.await;
+            let origin = origin_task.await.ok().flatten();
             let _ = ws.update(cx, |ws, cx| {
                 let Some(repo) = ws.repos.iter_mut().find(|r| r.entry.id == id) else {
                     return;
                 };
+                repo.origin = origin;
                 repo.branches_loading = false;
                 if let Ok(Ok(branches)) = result {
                     repo.branches = branches;
@@ -1061,6 +1064,25 @@ impl Workspace {
         let path = repo.entry.path.clone();
         let id = repo.entry.id;
         let task = bridge::remove_branch(cx, path, name);
+        cx.spawn(async move |ws, cx| {
+            let result = task.await;
+            let _ = ws.update(cx, |ws, cx| {
+                if let Some(repo) = ws.repos.iter_mut().find(|r| r.entry.id == id) {
+                    repo.action_error = action_error(result);
+                }
+                ws.refresh_active_branches(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Make the active repository fetch / pull / push as one connected GitHub account.
+    pub fn set_repo_account(&mut self, login: String, cx: &mut Context<Self>) {
+        let Some(repo) = self.active_repo() else {
+            return;
+        };
+        let id = repo.entry.id;
+        let task = bridge::set_origin_account(cx, repo.entry.path.clone(), login);
         cx.spawn(async move |ws, cx| {
             let result = task.await;
             let _ = ws.update(cx, |ws, cx| {

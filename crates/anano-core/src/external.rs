@@ -153,15 +153,42 @@ pub fn is_github_https(url: &str) -> bool {
         .is_some_and(|host| host.eq_ignore_ascii_case(GITHUB_HOST))
 }
 
-/// Pin a GitHub HTTPS URL to one account by putting the login in the URL
+/// `owner/repo.git` out of any GitHub remote URL: `https://[user@]github.com/…`,
+/// `git@github.com:…` or `ssh://git@github.com/…`.
+fn github_repo_path(url: &str) -> Option<&str> {
+    if is_github_https(url) {
+        return url["https://".len()..]
+            .split_once('/')
+            .map(|(_, path)| path);
+    }
+    url.strip_prefix("git@github.com:")
+        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
+}
+
+/// Pin a GitHub remote to one account by putting the login in an HTTPS URL
 /// (`https://login@github.com/owner/repo`). That's how a repository remembers its account:
 /// the remote URL carries it, and `git::remote::auth_callbacks` looks up that login's token.
-/// Anything else (SSH, other hosts, already pinned) comes back unchanged.
+/// SSH remotes are switched to HTTPS (the token is an HTTPS credential), an existing pin is
+/// replaced, and non-GitHub URLs come back unchanged.
 pub fn with_account(url: &str, login: &str) -> String {
-    match url.strip_prefix("https://github.com/") {
-        Some(rest) => format!("https://{login}@{GITHUB_HOST}/{rest}"),
+    match github_repo_path(url) {
+        Some(path) => format!("https://{login}@{GITHUB_HOST}/{path}"),
         None => url.to_string(),
     }
+}
+
+/// The login a GitHub HTTPS remote is pinned to, if any.
+pub fn account_of(url: &str) -> Option<&str> {
+    if !is_github_https(url) {
+        return None;
+    }
+    let authority = url["https://".len()..].split('/').next()?;
+    authority.rsplit_once('@').map(|(login, _)| login)
+}
+
+/// Whether `url` is a GitHub remote an account can be picked for.
+pub fn is_github(url: &str) -> bool {
+    github_repo_path(url).is_some()
 }
 
 /// A `gh auth login` device flow waiting for the user to enter [`Self::code`] in the browser.
@@ -295,18 +322,26 @@ mod tests {
     }
 
     #[test]
-    fn with_account_pins_only_plain_github_https_urls() {
-        assert_eq!(
-            with_account("https://github.com/o/r.git", "me"),
-            "https://me@github.com/o/r.git"
-        );
-        for untouched in [
-            "git@github.com:o/r.git",
+    fn with_account_pins_any_github_remote_and_nothing_else() {
+        for url in [
+            "https://github.com/o/r.git",
             "https://other@github.com/o/r.git",
-            "https://gitlab.com/o/r.git",
+            "git@github.com:o/r.git",
+            "ssh://git@github.com/o/r.git",
         ] {
-            assert_eq!(with_account(untouched, "me"), untouched);
+            assert_eq!(
+                with_account(url, "me"),
+                "https://me@github.com/o/r.git",
+                "{url}"
+            );
         }
+        assert_eq!(
+            with_account("https://gitlab.com/o/r.git", "me"),
+            "https://gitlab.com/o/r.git"
+        );
+        assert_eq!(account_of("https://me@github.com/o/r.git"), Some("me"));
+        assert_eq!(account_of("https://github.com/o/r.git"), None);
+        assert_eq!(account_of("https://me@gitlab.com/o/r.git"), None);
     }
 
     #[test]

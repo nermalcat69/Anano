@@ -29,6 +29,12 @@ pub fn init_repo(parent: &Path, name: &str) -> Result<PathBuf, GitError> {
     Ok(dest)
 }
 
+/// The URL of `origin`, if the repository has one.
+pub fn origin_url(repo_path: &Path) -> Option<String> {
+    let repo = Repository::discover(repo_path).ok()?;
+    repo.find_remote("origin").ok()?.url().map(str::to_string)
+}
+
 /// Point `origin` at `url` (adding the remote if the repository has none yet).
 pub fn set_origin(repo_path: &Path, url: &str) -> Result<(), GitError> {
     let repo = Repository::open(repo_path).map_err(GitError::Open)?;

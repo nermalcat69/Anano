@@ -22,6 +22,8 @@ pub struct OpenRepo {
     pub syncing: Option<SyncKind>,
     /// 上一次 fetch / pull / push 之后，仓库 LFS 那部分的同步结果。
     pub lfs_status: Option<LfsSync>,
+    /// `origin`'s URL; refreshed together with the branch list.
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +47,7 @@ impl OpenRepo {
             action_error: None,
             syncing: None,
             lfs_status: None,
+            origin: None,
         }
     }
 

@@ -33,11 +33,25 @@ pub(crate) fn auth_callbacks() -> RemoteCallbacks<'static> {
         // `https://<login>@github.com/...` pins the repository to one connected GitHub
         // account (see `external::with_account`); use that account's token.
         if allowed.contains(CredentialType::USER_PASS_PLAINTEXT)
-            && let Some(login) = username_from_url
             && crate::external::is_github_https(url)
-            && let Some(token) = crate::external::token(login)
         {
-            return Cred::userpass_plaintext(login, &token);
+            if let Some(login) = username_from_url {
+                if let Some(token) = crate::external::token(login) {
+                    return Cred::userpass_plaintext(login, &token);
+                }
+            } else {
+                // Not pinned to an account: offer the connected ones in turn, the terminal's
+                // default first (each rejection brings us back here for the next). This is
+                // what makes a plain `https://github.com/...` remote work at all when git
+                // has no credential helper libgit2 can see.
+                let mut accounts = crate::external::list_accounts();
+                accounts.sort_by_key(|a| !a.active);
+                if let Some(account) = accounts.get(attempts - 1)
+                    && let Some(token) = crate::external::token(&account.login)
+                {
+                    return Cred::userpass_plaintext(&account.login, &token);
+                }
+            }
         }
         if allowed.contains(CredentialType::SSH_KEY)
             && let Some(user) = username_from_url

@@ -499,6 +499,39 @@ impl Workspace {
         let syncing = repo.syncing;
         let action_error = repo.action_error.clone();
         let lfs_status = repo.lfs_status;
+        // Which connected GitHub account this repository syncs as; only for GitHub remotes.
+        let logins = self.account_logins();
+        let github_origin = repo
+            .origin
+            .as_deref()
+            .filter(|url| !logins.is_empty() && anano_core::external::is_github(url));
+        let account_menu = github_origin.map(|url| {
+            let pinned = anano_core::external::account_of(url).map(str::to_string);
+            let workspace = cx.entity();
+            let label = pinned
+                .clone()
+                .map(SharedString::from)
+                .unwrap_or_else(|| tr!("repo.sync.account"));
+            Button::new("sync-account")
+                .ghost()
+                .xsmall()
+                .icon(IconName::Github)
+                .label(label)
+                .tooltip(tr!("repo.sync.account_tooltip"))
+                .dropdown_menu(move |menu, _, _| {
+                    logins.iter().fold(menu, |menu, login| {
+                        let workspace = workspace.clone();
+                        let checked = pinned.as_deref() == Some(login.as_str());
+                        let login = login.clone();
+                        menu.item(PopupMenuItem::new(login.clone()).checked(checked).on_click(
+                            move |_, _, cx| {
+                                workspace
+                                    .update(cx, |ws, cx| ws.set_repo_account(login.clone(), cx));
+                            },
+                        ))
+                    })
+                })
+        });
 
         v_flex()
             .id("sync-toolbar")
@@ -540,6 +573,7 @@ impl Workspace {
                             .on_click(cx.listener(|this, _, _, cx| this.push(cx))),
                     ),
             )
+            .children(account_menu.map(|menu| h_flex().child(menu)))
             .when_some(action_error, |d, err| {
                 d.child(
                     div()
@@ -954,7 +988,11 @@ impl Workspace {
                     .small()
                     .w_full()
                     .disabled(!has_changes || !has_message)
-                    .label(tr!("repo.commit.commit"))
+                    .label(if crate::state::settings::settings(cx).push_on_commit {
+                        tr!("repo.commit.commit_and_push")
+                    } else {
+                        tr!("repo.commit.commit")
+                    })
                     .on_click(cx.listener(|this, _, window, cx| this.commit_active(window, cx))),
             )
     }

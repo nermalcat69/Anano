@@ -295,3 +295,29 @@ pub fn diff(
         .await?)
     })
 }
+
+/// `origin`'s URL (to show / change which GitHub account a repository uses).
+pub fn origin(cx: &App, repo: PathBuf) -> Task<anyhow::Result<Option<String>>> {
+    Tokio::spawn_result(cx, async move {
+        Ok(tokio::task::spawn_blocking(move || anano_core::git::origin_url(&repo)).await?)
+    })
+}
+
+/// Re-point `origin` so the repository fetches and pushes as `login`.
+pub fn set_origin_account(
+    cx: &App,
+    repo: PathBuf,
+    login: String,
+) -> Task<anyhow::Result<Result<(), GitError>>> {
+    Tokio::spawn_result(cx, async move {
+        Ok(
+            tokio::task::spawn_blocking(move || match anano_core::git::origin_url(&repo) {
+                Some(url) => {
+                    anano_core::git::set_origin(&repo, &external::with_account(&url, &login))
+                }
+                None => Ok(()),
+            })
+            .await?,
+        )
+    })
+}
