@@ -668,11 +668,11 @@ impl Workspace {
         let (muted, danger) = (theme.muted_foreground, theme.danger);
         let scope = account.scope();
         let Some(list) = account.lists.get(&scope) else {
-            return note(tr!("repo.account.loading"), muted);
+            return crate::ui::skeleton_list(8);
         };
         let query = self.account_search_input.read(cx).value().to_string();
         match &list.items {
-            None => note(tr!("repo.account.loading"), muted),
+            None => crate::ui::skeleton_list(8),
             Some(Err(err)) => note(err.clone().into(), danger),
             Some(Ok(items)) => {
                 let shown: Vec<&RemoteRepo> =
@@ -734,7 +734,7 @@ impl Workspace {
             theme.list_hover,
         );
         match &account.orgs {
-            None => note(tr!("repo.account.loading"), muted),
+            None => crate::ui::skeleton_list(8),
             Some(Err(err)) => note(err.clone().into(), danger),
             Some(Ok(orgs)) if orgs.is_empty() => note(tr!("repo.account.no_orgs"), muted),
             Some(Ok(orgs)) => v_flex()
@@ -809,7 +809,7 @@ impl Workspace {
         let _ = account;
         // ---- the history
         let history = match &browser.commits {
-            None => note(tr!("repo.account.loading_commits"), muted),
+            None => crate::ui::skeleton_list(8),
             Some(Err(err)) => note(err.clone().into(), danger),
             Some(Ok(list)) if list.is_empty() => note(tr!("repo.account.no_commits"), muted),
             Some(Ok(list)) => {
@@ -950,7 +950,7 @@ impl Workspace {
                             ),
                     );
                 let changes: AnyElement = match &browser.files {
-                    None => note(tr!("repo.account.loading_changes"), muted),
+                    None => crate::ui::skeleton_text(12),
                     Some(Err(err)) => note(err.clone().into(), danger),
                     Some(Ok(files)) if files.is_empty() => {
                         note(tr!("repo.pulls.review_no_files"), muted)

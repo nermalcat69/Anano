@@ -185,8 +185,126 @@ fn parse_jobs(json: &str) -> Result<Vec<RunJob>, String> {
         .collect())
 }
 
-/// `gh api --method GET <path> -F k=v …` for the repository behind `origin`.
+/// Where the response to one request is kept: per repository, named by a hash of the path
+/// and fields. Entries older than 30 days are ignored (see `external::read_fresh`).
+fn cache_file(origin: &str, path: &str, fields: &[(&str, String)]) -> Option<std::path::PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let slug = crate::external::repo_slug(origin)?;
+    let safe: String = slug
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (path, fields).hash(&mut hasher);
+    Some(
+        crate::external::cache_dir()?
+            .join("workflows")
+            .join(safe)
+            .join(format!("{:016x}.json", hasher.finish())),
+    )
+}
+
+fn read_cache(origin: &str, path: &str, fields: &[(&str, String)]) -> Option<String> {
+    crate::external::read_fresh(&cache_file(origin, path, fields)?)
+}
+
+/// Largest response kept on disk (a long job log can be many megabytes).
+const MAX_CACHED_BYTES: usize = 8 << 20;
+
+fn write_cache(origin: &str, path: &str, fields: &[(&str, String)], text: &str) {
+    if text.len() > MAX_CACHED_BYTES {
+        return;
+    }
+    if let Some(file) = cache_file(origin, path, fields)
+        && let Some(dir) = file.parent()
+        && std::fs::create_dir_all(dir).is_ok()
+    {
+        // Write-then-rename: a crash mid-write must not leave half a cache behind.
+        let part = file.with_extension("part");
+        if std::fs::write(&part, text).is_ok() {
+            let _ = std::fs::rename(part, file);
+        }
+    }
+}
+
+const WORKFLOWS_FIELDS: [(&str, &str); 2] = [("per_page", "100"), ("page", "1")];
+
+fn workflows_fields() -> Vec<(&'static str, String)> {
+    WORKFLOWS_FIELDS
+        .iter()
+        .map(|(k, v)| (*k, v.to_string()))
+        .collect()
+}
+
+fn runs_request(
+    workflow: Option<u64>,
+    status: RunStatus,
+    page: usize,
+) -> (String, Vec<(&'static str, String)>) {
+    let path = match workflow {
+        Some(id) => format!("actions/workflows/{id}/runs"),
+        None => "actions/runs".to_string(),
+    };
+    let mut fields = vec![
+        ("per_page", RUNS_PER_PAGE.to_string()),
+        ("page", page.to_string()),
+    ];
+    if let Some(status) = status.api() {
+        fields.push(("status", status.to_string()));
+    }
+    (path, fields)
+}
+
+fn jobs_request(run: u64) -> (String, Vec<(&'static str, String)>) {
+    (
+        format!("actions/runs/{run}/jobs"),
+        vec![("per_page", "100".into()), ("filter", "latest".into())],
+    )
+}
+
+/// The workflow list as last saved (instant; the caller then asks GitHub again).
+pub fn cached_workflows(origin: &str) -> Option<Vec<Workflow>> {
+    let json = read_cache(origin, "actions/workflows", &workflows_fields())?;
+    parse_workflows(&json).ok().map(|(list, _)| list)
+}
+
+/// A page of runs as last saved.
+pub fn cached_runs(
+    origin: &str,
+    workflow: Option<u64>,
+    status: RunStatus,
+    page: usize,
+) -> Option<RunPage> {
+    let (path, fields) = runs_request(workflow, status, page);
+    parse_runs(&read_cache(origin, &path, &fields)?).ok()
+}
+
+/// A run's jobs as last saved.
+pub fn cached_run_jobs(origin: &str, run: u64) -> Option<Vec<RunJob>> {
+    let (path, fields) = jobs_request(run);
+    parse_jobs(&read_cache(origin, &path, &fields)?).ok()
+}
+
+/// A job's log as last saved.
+pub fn cached_job_log(origin: &str, job: u64) -> Option<Vec<LogLine>> {
+    read_cache(origin, &format!("actions/jobs/{job}/logs"), &[]).map(|raw| parse_log(&raw))
+}
+
+/// `gh api --method GET <path> -F k=v …` for the repository behind `origin`. A successful
+/// answer is also saved, for the `cached_*` readers.
 fn api(origin: &str, path: &str, fields: &[(&str, String)]) -> Result<String, String> {
+    let text = api_uncached(origin, path, fields)?;
+    write_cache(origin, path, fields, &text);
+    Ok(text)
+}
+
+fn api_uncached(origin: &str, path: &str, fields: &[(&str, String)]) -> Result<String, String> {
     let (mut gh, slug) = gh_repo(origin)?;
     gh.args(["api", "--method", "GET", &format!("repos/{slug}/{path}")]);
     for (key, value) in fields {
@@ -221,27 +339,14 @@ pub fn list_runs(
     status: RunStatus,
     page: usize,
 ) -> Result<RunPage, String> {
-    let path = match workflow {
-        Some(id) => format!("actions/workflows/{id}/runs"),
-        None => "actions/runs".to_string(),
-    };
-    let mut fields = vec![
-        ("per_page", RUNS_PER_PAGE.to_string()),
-        ("page", page.to_string()),
-    ];
-    if let Some(status) = status.api() {
-        fields.push(("status", status.to_string()));
-    }
+    let (path, fields) = runs_request(workflow, status, page);
     parse_runs(&api(origin, &path, &fields)?)
 }
 
 /// The jobs of a run (the latest attempt), each with its steps.
 pub fn run_jobs(origin: &str, run: u64) -> Result<Vec<RunJob>, String> {
-    parse_jobs(&api(
-        origin,
-        &format!("actions/runs/{run}/jobs"),
-        &[("per_page", "100".into()), ("filter", "latest".into())],
-    )?)
+    let (path, fields) = jobs_request(run);
+    parse_jobs(&api(origin, &path, &fields)?)
 }
 
 /// What a line of a job log is, for highlighting.
@@ -274,7 +379,9 @@ pub fn job_log(origin: &str, job: u64) -> Result<Vec<LogLine>, String> {
     // `parse_log` strips them.
     gh.args(["api", "--method", "GET", "--allow-escape-sequences"])
         .arg(format!("repos/{slug}/actions/jobs/{job}/logs"));
-    Ok(parse_log(&gh_stdout(gh)?))
+    let raw = gh_stdout(gh)?;
+    write_cache(origin, &format!("actions/jobs/{job}/logs"), &[], &raw);
+    Ok(parse_log(&raw))
 }
 
 /// Remove terminal colour / cursor escape sequences.
@@ -459,5 +566,34 @@ no timestamp here
         let (list, total) = parse_workflows(wf).unwrap();
         assert_eq!(total, 2);
         assert!(list[0].active && !list[1].active);
+    }
+
+    /// A response saved by `api` is read back for the same request and only that one.
+    #[test]
+    fn responses_are_saved_per_request_and_read_back() {
+        let origin = format!(
+            "https://github.com/anano-test/cache-{}.git",
+            std::process::id()
+        );
+        let fields = [("per_page", "30".to_string()), ("page", "1".to_string())];
+        assert!(read_cache(&origin, "actions/runs", &fields).is_none());
+        write_cache(
+            &origin,
+            "actions/runs",
+            &fields,
+            "{\"total_count\":0,\"workflow_runs\":[]}",
+        );
+        assert!(read_cache(&origin, "actions/runs", &fields).is_some());
+        // Another page, another path: not the same entry.
+        let page2 = [("per_page", "30".to_string()), ("page", "2".to_string())];
+        assert!(read_cache(&origin, "actions/runs", &page2).is_none());
+        assert!(read_cache(&origin, "actions/workflows", &fields).is_none());
+        assert_eq!(
+            cached_runs(&origin, None, RunStatus::All, 1).map(|p| p.total),
+            Some(0)
+        );
+        if let Some(file) = cache_file(&origin, "actions/runs", &fields) {
+            let _ = std::fs::remove_dir_all(file.parent().unwrap());
+        }
     }
 }

@@ -443,6 +443,22 @@ pub struct AppSettings {
     /// 对齐才好扫；需要看长行时随时可以开。
     #[serde(default)]
     pub wrap_response_body: bool,
+    /// Colours of the Commit & Push and Review buttons, as `#RRGGBB`. Empty means the
+    /// default (dark, like the toolbar's Fetch origin button, with a neutral gray border).
+    #[serde(default)]
+    pub commit_button_bg: String,
+    #[serde(default)]
+    pub commit_button_border: String,
+    #[serde(default)]
+    pub review_button_bg: String,
+    #[serde(default)]
+    pub review_button_border: String,
+    /// The same buttons' colour while the pointer is over them (empty: the background,
+    /// a touch lighter).
+    #[serde(default)]
+    pub commit_button_hover: String,
+    #[serde(default)]
+    pub review_button_hover: String,
 }
 
 pub const EDITOR_FONT_SIZE_RANGE: std::ops::RangeInclusive<u32> = 10..=24;
@@ -460,6 +476,12 @@ impl Default for AppSettings {
             update_source: UpdateSourcePref::Auto,
             wrap_request_body: true,
             wrap_response_body: false,
+            commit_button_bg: String::new(),
+            commit_button_border: String::new(),
+            review_button_bg: String::new(),
+            review_button_border: String::new(),
+            commit_button_hover: String::new(),
+            review_button_hover: String::new(),
         }
     }
 }
@@ -525,6 +547,14 @@ impl Default for WorkspaceState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn settings_files_from_before_the_button_colours_still_load() {
+        let old = r#"{"editor_font_size": 14}"#;
+        let settings: AppSettings = serde_json::from_str(old).unwrap();
+        assert_eq!(settings.editor_font_size, 14);
+        assert!(settings.commit_button_bg.is_empty() && settings.review_button_border.is_empty());
+    }
+
     use super::*;
 
     #[test]

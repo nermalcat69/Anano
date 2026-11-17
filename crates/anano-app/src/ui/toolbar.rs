@@ -42,12 +42,14 @@ const BRANCH_WIDTH: f32 = 196.;
 const SYNC_WIDTH: f32 = 190.;
 const PULLS_WIDTH: f32 = 190.;
 const WORKFLOWS_WIDTH: f32 = 160.;
+/// The "+" after Workflows: create, clone or add a repository.
+const PLUS_WIDTH: f32 = 60.;
 /// The account button on the right: picture, name (cut with an ellipsis if very long), chevron.
 const ACCOUNT_WIDTH: f32 = 172.;
 /// The toolbar's width when everything is showing: the window must be at least this much
 /// wider than the sidebar, or the account button falls off the right edge.
 pub const MIN_TOOLBAR_WIDTH: f32 =
-    BRANCH_WIDTH + SYNC_WIDTH + PULLS_WIDTH + WORKFLOWS_WIDTH + ACCOUNT_WIDTH;
+    BRANCH_WIDTH + SYNC_WIDTH + PULLS_WIDTH + WORKFLOWS_WIDTH + PLUS_WIDTH + ACCOUNT_WIDTH;
 /// The branch panel is wider than its button: names plus "2 months ago" need the room.
 const PANEL_WIDTH: f32 = 380.;
 
@@ -379,6 +381,7 @@ impl Workspace {
             .as_deref()
             .is_some_and(anano_core::external::is_github);
         let filter = self.branch_filter.clone();
+        let add_ws = cx.entity();
 
         // Which connected GitHub account this repository syncs as (GitHub remotes only).
         let logins = self.account_logins();
@@ -536,7 +539,17 @@ impl Workspace {
                         .child(
                             content("toolbar-sync-content")
                                 .when(!syncing, |h| {
-                                    h.child(Icon::empty().path(sync_icon).size_5())
+                                    // Publishing keeps its cloud arrow; fetch / pull / push
+                                    // share the coloured Fetch origin icon.
+                                    if publishing {
+                                        h.child(Icon::empty().path(sync_icon).size_5())
+                                    } else {
+                                        h.child(
+                                            gpui_kit::img(crate::assets::EMOJI_FETCH)
+                                                .size(px(24.))
+                                                .flex_none(),
+                                        )
+                                    }
                                 })
                                 .child(
                                     v_flex()
@@ -621,6 +634,83 @@ impl Workspace {
                             .on_click(cx.listener(|this, _, _, cx| this.open_workflows(cx))),
                     ))
                 })
+                // Add a repository: where the sidebar used to keep these three.
+                .child(slot(
+                    "toolbar-add-slot",
+                    PLUS_WIDTH,
+                    border,
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            crate::ui::button("toolbar-add")
+                                .ghost()
+                                .child(
+                                    gpui_kit::img(crate::assets::EMOJI_ADD)
+                                        .size(px(26.))
+                                        .flex_none(),
+                                )
+                                .tooltip(tr!("repo.toolbar.add_tooltip"))
+                                .dropdown_menu(move |menu, _, _| {
+                                    type Open = fn(
+                                        &mut Workspace,
+                                        &mut gpui_kit::Window,
+                                        &mut Context<Workspace>,
+                                    );
+                                    let entries: [(SharedString, IconName, Open); 3] = [
+                                        (
+                                            tr!("repo.switcher.add_create"),
+                                            IconName::Plus,
+                                            Workspace::open_create_repo_dialog,
+                                        ),
+                                        (
+                                            tr!("repo.switcher.add_clone"),
+                                            IconName::ArrowDown,
+                                            Workspace::open_clone_dialog,
+                                        ),
+                                        (
+                                            tr!("repo.switcher.add_existing"),
+                                            IconName::FolderOpen,
+                                            Workspace::add_existing_repo,
+                                        ),
+                                    ];
+                                    // Roomier than a stock menu row: wide, tall, large text, and
+                                    // the whole row (not just the words) is a pointer.
+                                    entries.into_iter().fold(
+                                        menu.min_w(px(280.)),
+                                        |menu, (label, icon, open)| {
+                                            let ws = add_ws.clone();
+                                            menu.item(
+                                                PopupMenuItem::element(move |_, _| {
+                                                    h_flex()
+                                                        .w_full()
+                                                        .gap_3()
+                                                        .items_center()
+                                                        .py_2p5()
+                                                        .px_1()
+                                                        .cursor_pointer()
+                                                        .text_base()
+                                                        .child(Icon::new(icon.clone()).size_5())
+                                                        .child(label.clone())
+                                                })
+                                                .on_click(move |_, window, cx| {
+                                                    // Next frame: the menu has closed by then,
+                                                    // and can't take the dialog down with it.
+                                                    let ws = ws.clone();
+                                                    window.defer(cx, move |window, cx| {
+                                                        ws.update(cx, |ws, cx| {
+                                                            open(ws, window, cx)
+                                                        });
+                                                    });
+                                                }),
+                                            )
+                                        },
+                                    )
+                                }),
+                        ),
+                ))
                 .child(div().flex_1())
                 .children(account_menu.map(|menu| {
                     div()
@@ -773,9 +863,9 @@ impl Workspace {
             return;
         }
         let workspace = cx.entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, window, _| {
             let (workspace, name) = (workspace.clone(), name.clone());
-            dialog
+            crate::ui::centered(dialog, window, 200.)
                 .title(tr!("repo.branch.delete", name = name.clone()))
                 .w(px(420.))
                 .content(|content, _, _| {
@@ -1181,6 +1271,71 @@ mod tests {
         let short = row_height(cx);
         assert_eq!(tall, px(36.));
         assert_eq!(short, tall, "rows were squeezed when the window got short");
+    }
+
+    /// A change made outside the app (a commit and a new file from a terminal) shows up in
+    /// the changes list and the history without any click.
+    #[gpui_kit::test]
+    fn changes_made_outside_the_app_show_up_by_themselves(cx: &mut gpui_kit::TestAppContext) {
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::bridge::init(cx);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                    .args(args)
+                    .current_dir(&repo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "1").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "one"]);
+
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        workspace.update(cx, |ws, cx| {
+            ws.watch_enabled = true;
+            ws.open_repo_path(repo.clone(), cx)
+        });
+        let wait = |cx: &mut gpui_kit::VisualTestContext, done: &dyn Fn(&Workspace) -> bool| {
+            for _ in 0..500 {
+                cx.run_until_parked();
+                if workspace.read_with(cx, |ws, _| done(ws)) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            false
+        };
+        assert!(wait(cx, &|ws| ws
+            .active_repo()
+            .is_some_and(|r| r.commits.len() == 1)));
+        // Let the watcher settle, then change the repository behind the app's back.
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        std::fs::write(repo.join("b.txt"), "new").unwrap();
+        assert!(
+            wait(cx, &|ws| ws.active_repo().is_some_and(|r| r
+                .statuses
+                .iter()
+                .any(|s| s.path == "b.txt"))),
+            "a new file never appeared in the changes list"
+        );
+        git(&["add", "."]);
+        git(&["commit", "-qm", "two"]);
+        assert!(
+            wait(cx, &|ws| ws
+                .active_repo()
+                .is_some_and(|r| r.commits.len() == 2)),
+            "a commit made elsewhere never appeared in the history"
+        );
     }
 
     /// At the smallest window the app allows, every toolbar button is fully on screen,

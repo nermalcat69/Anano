@@ -246,7 +246,7 @@ fn review_body(workspace: &Entity<Workspace>, cx: &mut App) -> AnyElement {
 
     // ---- the files and the diff
     let main = match &files {
-        None => note(tr!("repo.pulls.review_loading"), muted),
+        None => crate::ui::skeleton_text(16),
         Some(Err(err)) => note(err.clone().into(), danger),
         Some(Ok(files)) if files.is_empty() => note(tr!("repo.pulls.review_no_files"), muted),
         Some(Ok(files)) => {
@@ -570,9 +570,9 @@ impl Workspace {
     /// The dialog itself; its content is `review_body`, read from the review state.
     fn show_review_dialog(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
         let workspace = cx.entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, window, _| {
             let workspace = workspace.clone();
-            dialog
+            crate::ui::centered(dialog, window, 700.)
                 .title(tr!("repo.pulls.review_title", number = number.to_string()))
                 .w(px(DIALOG_WIDTH))
                 .content(move |content, _, cx| content.child(review_body(&workspace, cx)))

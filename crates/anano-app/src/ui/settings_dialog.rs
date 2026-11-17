@@ -83,17 +83,19 @@ pub fn open_settings_page(
         return;
     }
     let weak = workspace.downgrade();
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         let weak = weak.clone();
-        dialog
+        crate::ui::centered(dialog, window, 720.)
             .title(tr!("settings.title"))
             .w(px(DIALOG_WIDTH))
             .content(move |content, _, cx| {
-                content.child(div().w_full().h(px(CONTENT_HEIGHT)).child(render_settings(
-                    weak.clone(),
-                    page,
-                    cx,
-                )))
+                content.child(
+                    div()
+                        .w_full()
+                        .h(px(CONTENT_HEIGHT))
+                        .cursor_pointer()
+                        .child(render_settings(weak.clone(), page, cx)),
+                )
             })
             .footer(
                 // 不用 DialogClose 包按钮：它外面套了一层 size_full 的 div，会把按钮拉成整行
@@ -198,9 +200,74 @@ fn general_page(workspace: WeakEntity<Workspace>) -> SettingPage {
                     .description(tr!("settings.editor_font_size_desc")),
                 ),
         );
+    let page = page.group(button_colors_group());
     #[cfg(target_os = "linux")]
     let page = page.group(linux_system_group());
     page
+}
+
+/// One colour setting as a text box taking `#RRGGBB`. Empty puts the default back; anything
+/// that isn't a colour is ignored until it is one (so half-typed text never breaks a button).
+fn colour_item(
+    label: SharedString,
+    read: fn(&anano_core::model::AppSettings) -> &String,
+    write: fn(&mut anano_core::model::AppSettings, String),
+) -> SettingItem {
+    SettingItem::new(
+        label,
+        SettingField::input(
+            move |cx| SharedString::from(read(&settings::settings(cx)).clone()),
+            move |value, cx| {
+                let text = value.trim().to_string();
+                if text.is_empty() || crate::ui::parse_hex(&text).is_some() {
+                    let normal = if text.is_empty() || text.starts_with('#') {
+                        text
+                    } else {
+                        format!("#{text}")
+                    };
+                    settings::update(cx, |s| write(s, normal));
+                }
+            },
+        )
+        .default_value(SharedString::default()),
+    )
+    .description(tr!("settings.button_colour_hint"))
+}
+
+/// The Commit & Push and Review buttons' background and border colours.
+fn button_colors_group() -> SettingGroup {
+    SettingGroup::new()
+        .title(tr!("settings.buttons"))
+        .item(colour_item(
+            tr!("settings.commit_bg"),
+            |s| &s.commit_button_bg,
+            |s, v| s.commit_button_bg = v,
+        ))
+        .item(colour_item(
+            tr!("settings.commit_border"),
+            |s| &s.commit_button_border,
+            |s, v| s.commit_button_border = v,
+        ))
+        .item(colour_item(
+            tr!("settings.commit_hover"),
+            |s| &s.commit_button_hover,
+            |s, v| s.commit_button_hover = v,
+        ))
+        .item(colour_item(
+            tr!("settings.review_bg"),
+            |s| &s.review_button_bg,
+            |s, v| s.review_button_bg = v,
+        ))
+        .item(colour_item(
+            tr!("settings.review_border"),
+            |s| &s.review_button_border,
+            |s, v| s.review_button_border = v,
+        ))
+        .item(colour_item(
+            tr!("settings.review_hover"),
+            |s| &s.review_button_hover,
+            |s, v| s.review_button_hover = v,
+        ))
 }
 
 /// Linux 专属：「加入应用菜单」开关。真值是 .desktop 文件存不存在，不进 settings.json，

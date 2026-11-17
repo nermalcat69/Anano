@@ -31,6 +31,8 @@ thiserror = "2.0"
 # Git 集成（phase 1）：libgit2 绑定，默认 feature（系统 libgit2 / 打包的 vendored openssl 由
 # libgit2-sys 自行决定），构建失败再考虑 `vendored-libgit2`。
 git2 = "0.19"
+# Watch a repository for changes (its .git and working tree) so the views reload by themselves.
+notify = "7"
 # i18n：与 gpui-component 共用同一个 rust-i18n（set_locale 是跨 crate 的全局）
 rust-i18n = "4.2"
 anyhow = "1.0"
@@ -45,9 +47,21 @@ ulid = { version = "3.0.0", features = ["serde"] }
 [patch.crates-io]
 # arrayref 0.3.5–0.3.9 已在 crates.io 被 yank（tiny-skia -> resvg -> gpui-component 传递依赖）
 arrayref = { path = "vendor/arrayref" }
+# Dialogs appear in place instead of sliding down from the top: vendor/gpui-component is 0.6.1
+# with the slide / fade animation removed from dialog.rs (see the "Anano:" comment there).
+gpui-component = { path = "vendor/gpui-component" }
 
 [profile.dev]
 debug = "limited"
+# Our own code (it builds every frame's element tree) is lightly optimised: unoptimised
+# iterator chains and closures were measurable in a long list. Still fast to rebuild.
+opt-level = 1
+
+# Every other dependency fully optimised: PNG / JPEG decoding of profile pictures, JSON of big
+# pull request pages, markdown parsing, SVG. At opt-level 0 each of those hitches the UI
+# thread. (Dependencies rebuild rarely; only the first build after this change is slow.)
+[profile.dev.package."*"]
+opt-level = 3
 
 # 开发构建里只给渲染 / 文本 / 组件这一层开优化（官方 installation 文档的推荐清单 + 我们额外的 tree-sitter / ropey）
 [profile.dev.package]

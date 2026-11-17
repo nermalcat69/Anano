@@ -16,7 +16,7 @@ use gpui_kit::component::{
     dialog::DialogFooter,
     h_flex,
     input::{Input, InputEvent},
-    text::markdown,
+    text::{TextView, markdown},
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -117,6 +117,8 @@ pub struct PullRequests {
     pub open: Option<u64>,
     pub detail: Option<Result<PullRequestDetail, String>>,
     pub merging: bool,
+    /// "Close pull request" is running.
+    pub closing: bool,
     /// How many times in a row GitHub has answered "not worked out yet" for the open pull
     /// request's mergeability (it computes that lazily, a moment after anything changes).
     pub merge_checks: u8,
@@ -347,7 +349,10 @@ fn event_row(ix: usize, event: &PrEvent, avatars: &Avatars, cx: &App) -> impl In
                 event.at,
                 cx,
             ))
-            .child(markdown(event.text.clone()).selectable(true)),
+            // One id per event: `markdown()` keys its parsed state by the line of code that
+            // called it, so every event drawn from this one line shared a single state and
+            // each frame re-parsed all of them (the stutter in a long conversation).
+            .child(TextView::markdown(("pr-event-md", ix), event.text.clone()).selectable(true)),
         PrEventKind::Review => {
             // A review's text is its verdict, then (optionally) what the reviewer wrote.
             let (verdict, body) = event.text.split_once('\n').unwrap_or((&event.text, ""));
@@ -357,7 +362,9 @@ fn event_row(ix: usize, event: &PrEvent, avatars: &Avatars, cx: &App) -> impl In
                         .child(verdict_badge(verdict, cx)),
                 )
                 .when(!body.trim().is_empty(), |b| {
-                    b.child(markdown(body.to_string()).selectable(true))
+                    b.child(
+                        TextView::markdown(("pr-review-md", ix), body.to_string()).selectable(true),
+                    )
                 })
         }
     };
@@ -503,8 +510,12 @@ impl Workspace {
         pulls.revalidating = true;
         let generation = pulls.generation;
         let search = pulls.search();
-        let cached = (pulls.list.is_none() && search.is_plain())
-            .then(|| crate::bridge::cached_pull_requests(cx, origin.clone(), search.state));
+        // Every query keeps its own cached pages (the plain list and each author / text
+        // search), shown at once while GitHub is asked again behind them.
+        let cached = pulls
+            .list
+            .is_none()
+            .then(|| crate::bridge::cached_pull_requests(cx, origin.clone(), search.clone()));
         cx.notify();
         self.load_pr_counts(cx);
         cx.spawn(async move |ws, cx| {
@@ -856,9 +867,9 @@ impl Workspace {
             return;
         }
         let workspace = cx.entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, window, _| {
             let (workspace, title) = (workspace.clone(), title.clone());
-            dialog
+            crate::ui::centered(dialog, window, 200.)
                 .title(tr!("repo.pulls.merge_title", number = number.to_string()))
                 .w(px(440.))
                 .content(move |content, _, _| content.child(div().text_sm().child(title.clone())))
@@ -882,6 +893,69 @@ impl Workspace {
                         ),
                 )
         });
+    }
+
+    /// Closing without merging is undone on GitHub, but still visible to everyone: ask first.
+    fn confirm_close(
+        &mut self,
+        number: u64,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, window, _| {
+            let (workspace, title) = (workspace.clone(), title.clone());
+            crate::ui::centered(dialog, window, 200.)
+                .title(tr!("repo.pulls.close_title", number = number.to_string()))
+                .w(px(440.))
+                .content(move |content, _, _| content.child(div().text_sm().child(title.clone())))
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            crate::ui::button("close-cancel")
+                                .outline()
+                                .label(tr!("common.cancel"))
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            crate::ui::button("close-confirm")
+                                .danger()
+                                .label(tr!("repo.pulls.close"))
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    workspace
+                                        .update(cx, |ws, cx| ws.close_pull_request(number, cx));
+                                }),
+                        ),
+                )
+        });
+    }
+
+    fn close_pull_request(&mut self, number: u64, cx: &mut Context<Self>) {
+        let (Some(origin), Some(pulls)) = (self.pulls_origin(), &mut self.pulls) else {
+            return;
+        };
+        pulls.closing = true;
+        pulls.merge_error = None;
+        cx.notify();
+        let task = crate::bridge::close_pull_request(cx, origin, number);
+        cx.spawn(async move |ws, cx| {
+            let result = task.await;
+            let _ = ws.update(cx, |ws, cx| {
+                if let Some(pulls) = &mut ws.pulls {
+                    pulls.closing = false;
+                    pulls.merge_error = result.err().map(|e| e.to_string());
+                }
+                // Show what GitHub now says, and move the pull request between the lists.
+                ws.open_pull_request(number, cx);
+                ws.reload_pull_requests(cx);
+            });
+        })
+        .detach();
     }
 
     fn merge_pull_request(&mut self, number: u64, cx: &mut Context<Self>) {
@@ -911,10 +985,9 @@ impl Workspace {
 
     fn render_pull_list(&self, pulls: &PullRequests, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (muted, danger, hover, active, border) = (
+        let (muted, danger, active, border) = (
             theme.muted_foreground,
             theme.danger,
-            theme.list_hover,
             theme.list_active,
             theme.border,
         );
@@ -980,7 +1053,7 @@ impl Workspace {
         });
         let searching = pulls.author.is_some() || !pulls.text.is_empty();
         let body = match &pulls.list {
-            None => note(tr!("repo.pulls.loading"), muted),
+            None => crate::ui::skeleton_list(8),
             Some(Err(err)) => note(err.clone().into(), danger),
             Some(Ok(list)) if list.is_empty() => v_flex()
                 .id("pull-empty")
@@ -996,65 +1069,108 @@ impl Workspace {
                 ))
                 .children(footer)
                 .into_any_element(),
-            Some(Ok(list)) => v_flex()
-                .id("pull-list")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .children(list.iter().map(|pr| {
-                    let number = pr.number;
-                    let selected = pulls.open == Some(number);
-                    v_flex()
-                        .id(("pull", number as usize))
-                        .flex_none()
-                        .px_3()
-                        .py_2()
-                        .gap_1()
-                        .border_b_1()
-                        .border_color(border)
-                        .cursor_pointer()
-                        .when(selected, |row| row.bg(active))
-                        .hover(move |style| style.bg(hover))
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.open_pull_request(number, cx)),
+            Some(Ok(list)) => {
+                // Only the rows on screen are built, however many pages are loaded.
+                let count = list.len();
+                v_flex()
+                    .id("pull-list")
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        gpui_kit::uniform_list(
+                            "pull-list-rows",
+                            count,
+                            cx.processor(
+                                move |this: &mut Workspace,
+                                      range: std::ops::Range<usize>,
+                                      _,
+                                      cx| {
+                                    let Some(pulls) = this.pulls.as_ref() else {
+                                        return Vec::new();
+                                    };
+                                    let Some(Ok(list)) = &pulls.list else {
+                                        return Vec::new();
+                                    };
+                                    let open = pulls.open;
+                                    let theme = cx.theme();
+                                    let (muted, hover, active, border) = (
+                                        theme.muted_foreground,
+                                        theme.list_hover,
+                                        theme.list_active,
+                                        theme.border,
+                                    );
+                                    list.iter()
+                                        .skip(range.start)
+                                        .take(range.len())
+                                        .map(|pr| {
+                                            let number = pr.number;
+                                            let selected = open == Some(number);
+                                            v_flex()
+                                                .id(("pull", number as usize))
+                                                .flex_none()
+                                                .w_full()
+                                                .overflow_hidden()
+                                                .px_3()
+                                                .py_2()
+                                                .gap_1()
+                                                .border_b_1()
+                                                .border_color(border)
+                                                .cursor_pointer()
+                                                .when(selected, |row| row.bg(active))
+                                                .hover(move |style| style.bg(hover))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.open_pull_request(number, cx)
+                                                }))
+                                                .child(
+                                                    h_flex()
+                                                        .gap_2()
+                                                        .items_center()
+                                                        .child(
+                                                            div()
+                                                                .flex_1()
+                                                                .min_w_0()
+                                                                .truncate()
+                                                                .text_sm()
+                                                                .font_weight(FontWeight::MEDIUM)
+                                                                .child(pr.title.clone()),
+                                                        )
+                                                        .child(state_badge(pr, cx)),
+                                                )
+                                                .child(
+                                                    h_flex()
+                                                        .gap_1p5()
+                                                        .items_center()
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .child(crate::ui::avatar(
+                                                            picture(
+                                                                &this.account_avatars,
+                                                                &pr.author,
+                                                            ),
+                                                            &pr.author,
+                                                            px(14.),
+                                                            cx,
+                                                        ))
+                                                        .child(div().min_w_0().truncate().child(
+                                                            format!(
+                                                                "#{} • {} • {}",
+                                                                pr.number,
+                                                                pr.author,
+                                                                crate::ui::time_ago(pr.created_at)
+                                                            ),
+                                                        )),
+                                                )
+                                        })
+                                        .collect()
+                                },
+                            ),
                         )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_sm()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(pr.title.clone()),
-                                )
-                                .child(state_badge(pr, cx)),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_1p5()
-                                .items_center()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(crate::ui::avatar(
-                                    picture(&self.account_avatars, &pr.author),
-                                    &pr.author,
-                                    px(14.),
-                                    cx,
-                                ))
-                                .child(div().min_w_0().truncate().child(format!(
-                                    "#{} • {} • {}",
-                                    pr.number,
-                                    pr.author,
-                                    crate::ui::time_ago(pr.created_at)
-                                ))),
-                        )
-                }))
-                .children(footer)
-                .into_any_element(),
+                        .flex_1()
+                        .min_h_0(),
+                    )
+                    .children(footer)
+                    .into_any_element()
+            }
         };
         v_flex()
             .size_full()
@@ -1156,7 +1272,7 @@ impl Workspace {
         let (muted, danger, border) = (theme.muted_foreground, theme.danger, theme.border);
         let pr = match (&pulls.open, &pulls.detail) {
             (None, _) => return note(tr!("repo.pulls.pick_one"), muted),
-            (_, None) => return note(tr!("repo.pulls.loading_one"), muted),
+            (_, None) => return crate::ui::skeleton_text(18),
             (_, Some(Err(err))) => return note(err.clone().into(), danger),
             (_, Some(Ok(pr))) => pr,
         };
@@ -1218,7 +1334,8 @@ impl Workspace {
         } else {
             Vec::new()
         };
-        let (success, on_success) = (cx.theme().success, gpui_kit::white());
+        // A dark green that holds white text in both themes (the theme's own green is light).
+        let (success, on_success) = (gpui_kit::rgb(0x1a5c2e).into(), gpui_kit::white());
         let section = |title: SharedString| {
             div()
                 .text_sm()
@@ -1226,6 +1343,7 @@ impl Workspace {
                 .child(title)
         };
         let (number, title, url) = (pr.summary.number, pr.summary.title.clone(), pr.url.clone());
+        let close_title = title.clone();
         let author = pr.summary.author.clone();
         let author_face = |size| {
             crate::ui::avatar(
@@ -1236,8 +1354,25 @@ impl Workspace {
             )
         };
         let review_button = crate::ui::button("pull-review")
-            .primary()
-            .label(tr!("repo.pulls.review"))
+            .custom(crate::ui::accent_button(
+                cx,
+                crate::ui::AccentButton::Review,
+            ))
+            .border_1()
+            .border_color(crate::ui::accent_colors(cx, crate::ui::AccentButton::Review).1)
+            // The word, then the picture after it, both on one centred line.
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .justify_center()
+                    .child(tr!("repo.pulls.review"))
+                    .child(
+                        gpui_kit::img(crate::assets::EMOJI_REVIEW)
+                            .size(px(18.))
+                            .flex_none(),
+                    ),
+            )
             .on_click(cx.listener(|this, _, window, cx| this.open_review_dialog(window, cx)));
         // The header stays put; only what is below it scrolls.
         let header = h_flex()
@@ -1353,10 +1488,29 @@ impl Workspace {
                     // "This pull request has been merged.": green, with white text.
                     .when(merged, |b| b.bg(success).text_color(on_success))
                     .child(
-                        div()
-                            .text_sm()
-                            .when(merged, |d| d.font_weight(FontWeight::SEMIBOLD))
-                            .child(crate::ui::selectable("pull-verdict", verdict)),
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .when(merged, |row| {
+                                row.child(
+                                    gpui_kit::img(crate::assets::EMOJI_BHOPU)
+                                        .size(px(28.))
+                                        .flex_none(),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .when(merged, |d| d.font_weight(FontWeight::SEMIBOLD))
+                                    .child(crate::ui::selectable("pull-verdict", verdict)),
+                            )
+                            .when(merged, |row| {
+                                row.child(
+                                    gpui_kit::img(crate::assets::EMOJI_HIPPIE)
+                                        .size(px(28.))
+                                        .flex_none(),
+                                )
+                            }),
                     )
                     // A pull request of the open repository that conflicts with its base:
                     // Claude Code can check it out and resolve the conflicts.
@@ -1409,6 +1563,25 @@ impl Workspace {
                                         .disabled(!can_merge || pulls.merging || checking)
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.confirm_merge(number, title.clone(), window, cx)
+                                        })),
+                                )
+                                .child(
+                                    crate::ui::button("pull-close")
+                                        .outline()
+                                        .label(if pulls.closing {
+                                            tr!("repo.pulls.closing")
+                                        } else {
+                                            tr!("repo.pulls.close")
+                                        })
+                                        .loading(pulls.closing)
+                                        .disabled(pulls.closing || pulls.merging)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.confirm_close(
+                                                number,
+                                                close_title.clone(),
+                                                window,
+                                                cx,
+                                            )
                                         })),
                                 )
                                 .children(claude_buttons),

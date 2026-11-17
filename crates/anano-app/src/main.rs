@@ -62,7 +62,11 @@ fn primary(key: &str) -> String {
 
 /// The smallest the window can be made; see `window_min_size` below.
 const MIN_WIDTH: f32 =
-    state::workspace::SIDEBAR_DEFAULT_WIDTH + ui::toolbar::MIN_TOOLBAR_WIDTH + 4.;
+    state::workspace::SIDEBAR_DEFAULT_WIDTH + ui::toolbar::MIN_TOOLBAR_WIDTH + 12.;
+/// The window opens at its minimum: exactly wide enough for the sidebar and every toolbar
+/// button, with no empty stretch between the add-repository button and the account switcher.
+/// (It used to open at 1280, narrower than the minimum, which cut the account chevron off.)
+const BOOT_WIDTH: f32 = MIN_WIDTH;
 const MIN_HEIGHT: f32 = 700.;
 
 fn main() {
@@ -100,7 +104,7 @@ fn main() {
             // app_owns_titlebar_drag；Linux 额外申请客户端装饰（与 gpui-component story 同款），
             // 得不到时 gpui 回退到服务端装饰、TitleBar 自动不画控制按钮。
             let options = WindowOptions {
-                window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
+                window_bounds: Some(WindowBounds::centered(size(px(BOOT_WIDTH), px(820.)), cx)),
                 // Small enough to tile beside an editor, big enough that nothing is cut off:
                 // the default-width sidebar plus the whole toolbar (branch, sync, pull
                 // requests, account) across, and the tallest dialog (Create a New

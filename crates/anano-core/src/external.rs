@@ -622,9 +622,7 @@ pub fn refresh_pull_requests(
             break;
         }
     }
-    if search.is_plain() {
-        save_pull_cache(origin, search.state, &all, total);
-    }
+    save_pull_cache(origin, search, &all, total);
     Ok((all, total))
 }
 
@@ -643,13 +641,11 @@ pub fn more_pull_requests(
             all.push(item);
         }
     }
-    if search.is_plain() {
-        save_pull_cache(origin, search.state, &all, result.total);
-    }
+    save_pull_cache(origin, search, &all, result.total);
     Ok((all, result.total))
 }
 
-fn pull_cache_file(origin: &str, state: PullState) -> Option<PathBuf> {
+fn pull_cache_file(origin: &str, search: &PullSearch) -> Option<PathBuf> {
     // owner/name → a filename; never trust a repository name into a path.
     let safe: String = repo_slug(origin)?
         .chars()
@@ -661,11 +657,23 @@ fn pull_cache_file(origin: &str, state: PullState) -> Option<PathBuf> {
             }
         })
         .collect();
-    Some(
-        cache_dir()?
-            .join("pulls")
-            .join(format!("{safe}-{}.json", state.file_tag())),
-    )
+    Some(cache_dir()?.join("pulls").join(format!(
+        "{safe}-{}{}.json",
+        search.state.file_tag(),
+        search_tag(search)
+    )))
+}
+
+/// What tells a filtered search's cache file from the plain list's: empty for no filter,
+/// otherwise a hash of the author and text (so each query keeps its own pages).
+fn search_tag(search: &PullSearch) -> String {
+    if search.is_plain() {
+        return String::new();
+    }
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (search.author.as_deref(), search.text.trim().to_lowercase()).hash(&mut hasher);
+    format!("-q{:016x}", hasher.finish())
 }
 
 fn pulls_to_json(list: &[PullRequest], total: usize) -> String {
@@ -703,8 +711,8 @@ fn pulls_from_json(json: &str) -> Option<(Vec<PullRequest>, usize)> {
     Some((list, v["total"].as_u64().unwrap_or(0) as usize))
 }
 
-fn save_pull_cache(origin: &str, state: PullState, list: &[PullRequest], total: usize) {
-    if let Some(file) = pull_cache_file(origin, state)
+fn save_pull_cache(origin: &str, search: &PullSearch, list: &[PullRequest], total: usize) {
+    if let Some(file) = pull_cache_file(origin, search)
         && let Some(dir) = file.parent()
         && std::fs::create_dir_all(dir).is_ok()
     {
@@ -719,8 +727,11 @@ fn save_pull_cache(origin: &str, state: PullState, list: &[PullRequest], total: 
 /// What the last successful plain fetch saved for this repository and state: shown at once
 /// while a fresh copy is fetched behind it. May be stale, never wrong about a pull
 /// request's existence.
-pub fn cached_pull_requests(origin: &str, state: PullState) -> Option<(Vec<PullRequest>, usize)> {
-    pulls_from_json(&read_fresh(&pull_cache_file(origin, state)?)?)
+pub fn cached_pull_requests(
+    origin: &str,
+    search: &PullSearch,
+) -> Option<(Vec<PullRequest>, usize)> {
+    pulls_from_json(&read_fresh(&pull_cache_file(origin, search)?)?)
 }
 
 /// How long a cached pull request page stays usable. Past it the cache is ignored (and
@@ -728,7 +739,7 @@ pub fn cached_pull_requests(origin: &str, state: PullState) -> Option<(Vec<PullR
 pub const PULL_CACHE_DAYS: u64 = 30;
 
 /// The file's text, unless it is missing or older than [`PULL_CACHE_DAYS`].
-fn read_fresh(file: &Path) -> Option<String> {
+pub(crate) fn read_fresh(file: &Path) -> Option<String> {
     let age = std::fs::metadata(file)
         .ok()?
         .modified()
@@ -907,6 +918,13 @@ pub fn submit_review(
 pub fn merge_pull_request(origin: &str, number: u64) -> Result<(), String> {
     let (mut gh, slug) = gh_pr(origin)?;
     gh.args(["merge", &number.to_string(), "--repo", &slug, "--merge"]);
+    gh_stdout(gh).map(|_| ())
+}
+
+/// Close a pull request without merging it (it can be reopened on GitHub).
+pub fn close_pull_request(origin: &str, number: u64) -> Result<(), String> {
+    let (mut gh, slug) = gh_pr(origin)?;
+    gh.args(["close", &number.to_string(), "--repo", &slug]);
     gh_stdout(gh).map(|_| ())
 }
 
@@ -1525,5 +1543,45 @@ mod tests {
         assert!(!is_github_https("https://github.com.evil.io/o/r"));
         assert!(!is_github_https("https://evil.io/github.com/r"));
         assert!(!is_github_https("https://github.com@evil.io/o/r"));
+    }
+
+    #[test]
+    fn each_pull_request_query_has_its_own_cache_file() {
+        let origin = "https://github.com/o/r.git";
+        let plain = PullSearch {
+            state: PullState::Open,
+            author: None,
+            text: String::new(),
+        };
+        let by_ann = PullSearch {
+            author: Some("ann".into()),
+            ..plain.clone()
+        };
+        let by_bob = PullSearch {
+            author: Some("bob".into()),
+            ..plain.clone()
+        };
+        let typed = PullSearch {
+            text: " Fix ".into(),
+            ..plain.clone()
+        };
+        let files: Vec<_> = [&plain, &by_ann, &by_bob, &typed]
+            .iter()
+            .map(|s| pull_cache_file(origin, s).unwrap())
+            .collect();
+        for (i, a) in files.iter().enumerate() {
+            for b in &files[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        // The same query written differently is the same file.
+        let typed2 = PullSearch {
+            text: "fix".into(),
+            ..plain.clone()
+        };
+        assert_eq!(
+            pull_cache_file(origin, &typed),
+            pull_cache_file(origin, &typed2)
+        );
     }
 }

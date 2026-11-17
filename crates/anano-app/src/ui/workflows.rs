@@ -340,11 +340,15 @@ impl Workspace {
     }
 
     fn load_workflow_list(&mut self, cx: &mut Context<Self>) {
-        let (Some(origin), Some(state)) = (self.workflows_origin(), &self.workflows) else {
+        let (Some(origin), Some(state)) = (self.workflows_origin(), &mut self.workflows) else {
             return;
         };
         if state.workflows.is_some() {
             return;
+        }
+        // Saved from an earlier visit: shown now, replaced when GitHub answers.
+        if let Some(cached) = anano_core::workflows::cached_workflows(&origin) {
+            state.workflows = Some(Ok(cached));
         }
         let task = crate::bridge::list_workflows(cx, origin.clone());
         cx.spawn(async move |ws, cx| {
@@ -353,7 +357,11 @@ impl Workspace {
                 if ws.workflows_origin().as_deref() == Some(origin.as_str())
                     && let Some(state) = &mut ws.workflows
                 {
-                    state.workflows = Some(result);
+                    // A failed refresh keeps what the cache showed.
+                    match result {
+                        Err(_) if matches!(state.workflows, Some(Ok(_))) => {}
+                        other => state.workflows = Some(other),
+                    }
                     cx.notify();
                 }
             });
@@ -378,6 +386,15 @@ impl Workspace {
         }
         state.loading = true;
         let generation = state.generation;
+        // The first page as last saved for these filters, until the fresh one arrives.
+        if state.runs.is_none()
+            && let Some(page) =
+                anano_core::workflows::cached_runs(&origin, state.workflow, state.status, 1)
+        {
+            state.exhausted = page.items.len() < RUNS_PER_PAGE;
+            state.total = page.total;
+            state.runs = Some(Ok(page.items));
+        }
         let task = crate::bridge::list_runs(cx, origin.clone(), state.workflow, state.status, 1);
         cx.notify();
         cx.spawn(async move |ws, cx| {
@@ -511,9 +528,21 @@ impl Workspace {
         };
         let id = run.id;
         state.open = Some(run);
-        state.jobs = None;
+        state.jobs = anano_core::workflows::cached_run_jobs(&origin, id).map(Ok);
         state.job = None;
+        // Saved jobs: pick the one to read right away (its log is cached too).
+        let early_pick = match &state.jobs {
+            Some(Ok(jobs)) => jobs
+                .iter()
+                .find(|j| matches!(j.conclusion.as_str(), "failure" | "timed_out"))
+                .or(jobs.first())
+                .map(|j| j.id),
+            _ => None,
+        };
         let task = crate::bridge::run_jobs(cx, origin.clone(), id);
+        if let Some(job) = early_pick {
+            self.open_job(job, cx);
+        }
         cx.notify();
         cx.spawn(async move |ws, cx| {
             let result = task.await.map_err(|e| e.to_string());
@@ -533,8 +562,14 @@ impl Workspace {
                         .map(|j| j.id),
                     Err(_) => None,
                 };
-                state.jobs = Some(result);
-                if let Some(job) = pick {
+                // A failed refresh keeps the saved jobs.
+                match result {
+                    Err(_) if matches!(state.jobs, Some(Ok(_))) => {}
+                    other => state.jobs = Some(other),
+                }
+                // Open the log unless the saved jobs already did.
+                let already = state.job.is_some();
+                if let (Some(job), false) = (pick, already) {
                     ws.open_job(job, cx);
                 }
                 cx.notify();
@@ -558,19 +593,40 @@ impl Workspace {
             return;
         }
         state.logs.insert(job, LogState::Loading);
+        // A job that has finished never changes its log: the saved copy is the answer, and
+        // GitHub is only asked when there is none (or the job is still running).
+        let finished = matches!(&state.jobs, Some(Ok(jobs))
+            if jobs.iter().any(|j| j.id == job && !j.conclusion.is_empty()));
+        let saved = crate::bridge::cached_job_log(cx, origin.clone(), job);
         let task = crate::bridge::job_log(cx, origin, job);
         cx.notify();
         cx.spawn(async move |ws, cx| {
+            let saved = saved.await.ok().flatten();
+            let had_saved = saved.is_some();
+            if let Some(lines) = saved {
+                let _ = ws.update(cx, |ws, cx| {
+                    if let Some(state) = &mut ws.workflows {
+                        state.logs.insert(job, LogState::Ready(Rc::new(lines)));
+                        cx.notify();
+                    }
+                });
+            }
+            if had_saved && finished {
+                return; // nothing newer can exist
+            }
             let result = task.await;
             let _ = ws.update(cx, |ws, cx| {
                 if let Some(state) = &mut ws.workflows {
-                    state.logs.insert(
-                        job,
-                        match result {
-                            Ok(lines) => LogState::Ready(Rc::new(lines)),
-                            Err(err) => LogState::Failed(err.to_string()),
-                        },
-                    );
+                    match result {
+                        Ok(lines) => {
+                            state.logs.insert(job, LogState::Ready(Rc::new(lines)));
+                        }
+                        // A failed refresh keeps the saved log on screen.
+                        Err(_) if had_saved => {}
+                        Err(err) => {
+                            state.logs.insert(job, LogState::Failed(err.to_string()));
+                        }
+                    }
                     cx.notify();
                 }
             });
@@ -737,7 +793,7 @@ impl Workspace {
         });
         let open_id = state.open.as_ref().map(|r| r.id);
         let body = match &state.runs {
-            None => note(tr!("repo.workflows.loading"), muted),
+            None => crate::ui::skeleton_list(8),
             Some(Err(err)) => note(err.clone().into(), danger),
             Some(Ok(runs)) if runs.is_empty() => note(tr!("repo.workflows.none"), muted),
             Some(Ok(runs)) => v_flex()
@@ -889,7 +945,7 @@ impl Workspace {
 
         // ---- jobs, the selected one with its steps
         let jobs: AnyElement = match &state.jobs {
-            None => note(tr!("repo.workflows.loading_jobs"), muted),
+            None => crate::ui::skeleton_list(4),
             Some(Err(err)) => note(err.clone().into(), danger),
             Some(Ok(jobs)) if jobs.is_empty() => note(tr!("repo.workflows.no_jobs"), muted),
             Some(Ok(jobs)) => v_flex()
@@ -962,7 +1018,7 @@ impl Workspace {
         // ---- the log
         let log: AnyElement = match state.job.and_then(|j| state.logs.get(&j)) {
             None => note(tr!("repo.workflows.pick_job"), muted),
-            Some(LogState::Loading) => note(tr!("repo.workflows.loading_log"), muted),
+            Some(LogState::Loading) => crate::ui::skeleton_text(16),
             Some(LogState::Failed(err)) => note(err.clone().into(), danger),
             Some(LogState::Ready(lines)) => {
                 let errors = lines.iter().filter(|l| l.kind == LogKind::Error).count();

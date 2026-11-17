@@ -89,6 +89,12 @@ pub struct Workspace {
     /// Every Claude Code agent started here (running, finished, or the prompt being written).
     pub(crate) claude: Vec<crate::ui::claude_dialog::ClaudeSession>,
     pub(crate) claude_active: usize,
+    /// One watcher per open repository: what changes it on disk (a terminal, an editor,
+    /// another tool) reloads the changes, history and branch views by itself.
+    watchers: HashMap<PathBuf, anano_core::git::RepoWatcher>,
+    /// Off in tests, where a wake-up from the watcher's thread would trip the test
+    /// scheduler's determinism check; the one test of watching turns it on.
+    pub(crate) watch_enabled: bool,
     /// Claude reviews of pull requests, running or waiting for you (origin, number).
     pub(crate) pr_claude: HashMap<(String, u64), crate::ui::review_dialog::PrClaude>,
     pub(crate) claude_input: Entity<TextareaState>,
@@ -210,6 +216,8 @@ impl Workspace {
         let mut ws = Self {
             claude: Self::load_claude_sessions(),
             claude_active: 0,
+            watchers: HashMap::new(),
+            watch_enabled: !cfg!(test),
             pr_claude: HashMap::new(),
             claude_input: claude_input.clone(),
             claude_scroll: ScrollHandle::new(),
@@ -1033,11 +1041,66 @@ impl Workspace {
     }
 
     /// 重新读一次当前激活仓库的 `git status`（后台线程，见 `bridge::refresh_status`）。
+    /// Watch every open repository (and stop watching closed ones). Cheap to call again:
+    /// it only acts on repositories that gained or lost a watcher.
+    pub(crate) fn sync_watchers(&mut self, cx: &mut Context<Self>) {
+        if !self.watch_enabled {
+            return;
+        }
+        let open: Vec<PathBuf> = self.repos.iter().map(|r| r.entry.path.clone()).collect();
+        self.watchers.retain(|path, _| open.contains(path));
+        for path in open {
+            if self.watchers.contains_key(&path) {
+                continue;
+            }
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+            let Ok(watcher) = anano_core::git::watch(&path, move || {
+                let _ = tx.send(());
+            }) else {
+                continue;
+            };
+            self.watchers.insert(path.clone(), watcher);
+            cx.spawn(async move |ws, cx| {
+                // Ends when the watcher is dropped (its sender goes with it).
+                while rx.recv().await.is_some() {
+                    let alive = ws.update(cx, |ws, cx| ws.on_repo_changed(&path, cx));
+                    if alive.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// The sidebar's Reload button: read everything about the open repository again.
+    pub fn reload_active_repo(&mut self, cx: &mut Context<Self>) {
+        self.refresh_active_status(cx);
+        self.refresh_active_log(cx);
+        self.refresh_active_branches(cx);
+    }
+
+    /// `path` changed on disk. If it is the repository on screen, re-read everything that
+    /// can have moved: the changes list, history, and branches with ahead / behind and last
+    /// fetched (so the Fetch / Pull / Push button follows a push or fetch made elsewhere).
+    /// Other repositories are read when they are switched to.
+    fn on_repo_changed(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        tracing::debug!(target: "anano::watch", "repo changed: {}", path.display());
+        if self.active_repo().is_some_and(|r| r.entry.path == path) {
+            self.refresh_active_status(cx);
+            self.refresh_active_log(cx);
+            self.refresh_active_branches(cx);
+        }
+    }
+
     pub fn refresh_active_status(&mut self, cx: &mut Context<Self>) {
+        // New repositories are noticed here: every way of adding one reads its status.
+        self.sync_watchers(cx);
         let Some(repo) = self.repos.get_mut(self.active) else {
             return;
         };
-        repo.loading = true;
+        // `loading` is only true until the first read: later refreshes (this runs whenever
+        // the repository changes on disk) swap the data in without blanking the view.
         let path = repo.entry.path.clone();
         let id = repo.entry.id;
         cx.notify();
@@ -1081,7 +1144,6 @@ impl Workspace {
         let Some(repo) = self.repos.get_mut(self.active) else {
             return;
         };
-        repo.log_loading = true;
         let path = repo.entry.path.clone();
         let id = repo.entry.id;
         cx.notify();
@@ -1797,8 +1859,61 @@ fn render_banner(text: String) -> impl IntoElement {
     Alert::error("store-banner", text).banner().xsmall()
 }
 
+/// Frame statistics for the log (`RUST_LOG=anano=debug`): how often the window rebuilds
+/// its element tree and how long that takes, so "it lags" can be told apart into "too many
+/// frames" and "frames that are too slow" without guessing.
+struct FrameStats {
+    since: std::time::Instant,
+    frames: u32,
+    total: std::time::Duration,
+    worst: std::time::Duration,
+}
+
+thread_local! {
+    static FRAMES: std::cell::RefCell<Option<FrameStats>> = const { std::cell::RefCell::new(None) };
+}
+
+fn record_frame(took: std::time::Duration) {
+    // A single slow build is worth a line of its own.
+    if took > std::time::Duration::from_millis(8) {
+        tracing::warn!(target: "anano::frames", "slow render: {:.1} ms", took.as_secs_f64() * 1000.0);
+    }
+    FRAMES.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let stats = slot.get_or_insert_with(|| FrameStats {
+            since: std::time::Instant::now(),
+            frames: 0,
+            total: Default::default(),
+            worst: Default::default(),
+        });
+        stats.frames += 1;
+        stats.total += took;
+        stats.worst = stats.worst.max(took);
+        if stats.since.elapsed() >= std::time::Duration::from_secs(2) {
+            tracing::info!(
+                target: "anano::frames",
+                "{} renders in {:.1}s, avg {:.2} ms, worst {:.1} ms",
+                stats.frames,
+                stats.since.elapsed().as_secs_f64(),
+                stats.total.as_secs_f64() * 1000.0 / stats.frames as f64,
+                stats.worst.as_secs_f64() * 1000.0
+            );
+            *slot = None;
+        }
+    });
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let started = std::time::Instant::now();
+        let tree = self.render_tree(window, cx);
+        record_frame(started.elapsed());
+        tree
+    }
+}
+
+impl Workspace {
+    fn render_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.panels_normalize_pending && !self.sidebar_state.read(cx).sizes().is_empty() {
             self.panels_normalize_pending = false;
             self.reset_workspace_panels(cx);
@@ -1932,6 +2047,8 @@ mod tests {
     fn opening_switching_and_closing_repos_keeps_active_consistent(
         cx: &mut gpui_kit::TestAppContext,
     ) {
+        // The repositories' git reads finish on tokio's threads, outside the test scheduler.
+        cx.executor().allow_parking();
         cx.update(|cx| {
             gpui_kit::init(cx);
             crate::bridge::init(cx);

@@ -474,17 +474,33 @@ pub type PullList = (Vec<external::PullRequest>, usize);
 pub fn cached_pull_requests(
     cx: &App,
     origin: String,
-    state: external::PullState,
+    search: external::PullSearch,
 ) -> Task<anyhow::Result<Option<PullList>>> {
     Tokio::spawn_result(cx, async move {
         Ok(
-            tokio::task::spawn_blocking(move || external::cached_pull_requests(&origin, state))
+            tokio::task::spawn_blocking(move || external::cached_pull_requests(&origin, &search))
                 .await?,
         )
     })
 }
 
-/// Re-read the first `pages` pages of a search from GitHub (and cache them if plain).
+/// A job's log as last saved to disk (instant; finished jobs' logs never change).
+pub fn cached_job_log(
+    cx: &App,
+    origin: String,
+    job: u64,
+) -> Task<anyhow::Result<Option<Vec<anano_core::workflows::LogLine>>>> {
+    Tokio::spawn_result(cx, async move {
+        Ok(
+            tokio::task::spawn_blocking(move || {
+                anano_core::workflows::cached_job_log(&origin, job)
+            })
+            .await?,
+        )
+    })
+}
+
+/// Re-read the first `pages` pages of a search from GitHub (and cache them).
 pub fn refresh_pull_requests(
     cx: &App,
     origin: String,
@@ -566,6 +582,15 @@ pub fn pull_request(
 pub fn merge_pull_request(cx: &App, origin: String, number: u64) -> Task<anyhow::Result<()>> {
     Tokio::spawn_result(cx, async move {
         tokio::task::spawn_blocking(move || external::merge_pull_request(&origin, number))
+            .await?
+            .map_err(anyhow::Error::msg)
+    })
+}
+
+/// Close a pull request without merging it.
+pub fn close_pull_request(cx: &App, origin: String, number: u64) -> Task<anyhow::Result<()>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || external::close_pull_request(&origin, number))
             .await?
             .map_err(anyhow::Error::msg)
     })

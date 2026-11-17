@@ -84,6 +84,8 @@ tools:
       en: The parsed request will be summarized here
 
 sidebar:
+  reload:
+    en: Reload repository
   rail_aria:
     en: Navigation rail
   settings:
@@ -550,6 +552,22 @@ settings:
     en: Install the GitHub CLI (gh) to connect GitHub accounts
   accounts_plaintext:
     en: "Token stored in a plain file. Move it to the system keyring: gh auth login --secure-storage"
+  buttons:
+    en: Buttons
+  button_colour_hint:
+    en: "A colour as #RRGGBB, for example #26272B. Leave empty for the default."
+  commit_bg:
+    en: Commit & Push button background
+  commit_border:
+    en: Commit & Push button border
+  commit_hover:
+    en: Commit & Push button on hover
+  review_hover:
+    en: Review button on hover
+  review_bg:
+    en: Review button background
+  review_border:
+    en: Review button border
   accounts_default:
     en: default in terminal
   accounts_add:
@@ -967,6 +985,12 @@ repo:
       en: Merging pull request…
     checking:
       en: Checking if it can be merged…
+    close:
+      en: Close pull request
+    closing:
+      en: Closing pull request…
+    close_title:
+      en: "Close pull request #%{number} without merging?"
     merge_title:
       en: "Merge pull request #%{number}?"
     state:
@@ -1271,6 +1295,8 @@ repo:
       en: Hang on…
     never_fetched:
       en: Never fetched
+    add_tooltip:
+      en: Create, clone or add a repository
     last_fetched:
       en: "Fetched %{when}"
     just_now:

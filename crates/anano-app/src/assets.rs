@@ -52,6 +52,16 @@ pub const ICON_HISTORY: &str = "icons/history.svg";
 /// Clone dialog: private / public repository rows and the "refresh list" button.
 pub const ICON_LOCK: &str = "icons/lock.svg";
 pub const ICON_BOOK: &str = "icons/book.svg";
+/// Shown on a merged pull request (from the project's `public` folder).
+pub const EMOJI_BHOPU: &str = "emoji/bhopu.svg";
+pub const EMOJI_HIPPIE: &str = "emoji/hippie.svg";
+/// Coloured icons: the History tab, the Fetch origin button, the Commit & Push button.
+pub const EMOJI_HISTORY: &str = "emoji/history.svg";
+pub const EMOJI_FETCH: &str = "emoji/fetch.svg";
+pub const EMOJI_PUSH: &str = "emoji/push.svg";
+/// The toolbar's add-a-repository button, and the pull request Review button.
+pub const EMOJI_ADD: &str = "emoji/add.svg";
+pub const EMOJI_REVIEW: &str = "emoji/review.svg";
 /// The Claude Code mark (drawn in its own colour where it is used).
 pub const ICON_CLAUDE: &str = "icons/claude.svg";
 pub const ICON_REFRESH: &str = "icons/refresh-cw.svg";
@@ -81,6 +91,13 @@ const ASSETS: &[(&str, &[u8])] = &[
     (ICON_LOCK, include_bytes!("../assets/icons/lock.svg")),
     (ICON_BOOK, include_bytes!("../assets/icons/book.svg")),
     (ICON_CLAUDE, include_bytes!("../assets/icons/claude.svg")),
+    (EMOJI_BHOPU, include_bytes!("../assets/emoji/bhopu.svg")),
+    (EMOJI_HIPPIE, include_bytes!("../assets/emoji/hippie.svg")),
+    (EMOJI_HISTORY, include_bytes!("../assets/emoji/history.svg")),
+    (EMOJI_FETCH, include_bytes!("../assets/emoji/fetch.svg")),
+    (EMOJI_PUSH, include_bytes!("../assets/emoji/push.svg")),
+    (EMOJI_ADD, include_bytes!("../assets/emoji/add.svg")),
+    (EMOJI_REVIEW, include_bytes!("../assets/emoji/review.svg")),
     (
         ICON_REFRESH,
         include_bytes!("../assets/icons/refresh-cw.svg"),

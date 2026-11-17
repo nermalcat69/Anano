@@ -167,6 +167,7 @@ impl Workspace {
         let path_for_menu = path.clone();
         div()
             .id(("tab", ix))
+            .cursor_pointer()
             .role(Role::Tab)
             .aria_label(tr!("tab.aria", title = name.clone()))
             .aria_selected(selected)

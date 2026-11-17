@@ -82,7 +82,11 @@ pub fn find_claude() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("ANANO_CLAUDE") {
         return Some(PathBuf::from(path));
     }
-    let exe = if cfg!(windows) { "claude.exe" } else { "claude" };
+    let exe = if cfg!(windows) {
+        "claude.exe"
+    } else {
+        "claude"
+    };
     let on_path = std::env::var_os("PATH")
         .iter()
         .flat_map(std::env::split_paths)

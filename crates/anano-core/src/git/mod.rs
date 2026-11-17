@@ -12,6 +12,7 @@ pub mod model;
 pub mod remote;
 pub mod repo;
 pub mod status;
+pub mod watch;
 
 pub use branch::{
     checkout_branch, create_branch, current_branch_name, delete_branch, head_branch, list_branches,
@@ -33,3 +34,4 @@ pub use repo::{
     commit_paths, commit_staged, discard_change, discover_root, ignore_extension, ignore_path,
     recent_commits, repo_status, stage_all, stage_path, unstage_path,
 };
+pub use watch::{RepoWatcher, watch};

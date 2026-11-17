@@ -265,7 +265,7 @@ impl Workspace {
         let path = cx.new(|cx| InputState::new(window, cx).default_value(parent));
         let workspace = cx.entity();
 
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, window, _| {
             let (ws_c, on_github_c, account_c, repo_c) = (
                 workspace.clone(),
                 on_github.clone(),
@@ -280,7 +280,7 @@ impl Workspace {
                 repo.clone(),
             );
             let (url_f, path_f) = (url.clone(), path.clone());
-            dialog
+            crate::ui::centered(dialog, window, 560.)
                 .title(tr!("repo.clone.title"))
                 .w(px(DIALOG_WIDTH))
                 .content(move |content, _, cx| {
@@ -326,7 +326,7 @@ impl Workspace {
                             div().py_4().text_sm().text_color(color).child(text)
                         };
                         let list = match listed {
-                            None => note(tr!("repo.clone.repos_loading"), muted),
+                            None => div().child(crate::ui::skeleton_list(5)),
                             Some(Err(err)) => note(err.into(), danger),
                             Some(Ok(repos)) => {
                                 let rows: Vec<_> = repos
@@ -547,7 +547,7 @@ impl Workspace {
         self.create_form = Some(form.clone());
         let workspace = cx.entity();
 
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, window, _| {
             let (ws_c, name_c, description_c, path_c) = (
                 workspace.clone(),
                 name.clone(),
@@ -558,7 +558,7 @@ impl Workspace {
                 (readme.clone(), private.clone(), account.clone());
             let (gitignore_c, license_c) = (gitignore.clone(), license.clone());
             let (ws_f, form) = (workspace.clone(), form.clone());
-            dialog
+            crate::ui::centered(dialog, window, 640.)
                 .title(tr!("repo.create.title"))
                 .w(px(DIALOG_WIDTH))
                 .content(move |content, _, cx| {
@@ -578,15 +578,18 @@ impl Workspace {
                                 boxed(&description_c, border),
                             ))
                             .child(
-                                div().debug_selector(|| "create-readme".into()).child(
-                                    Checkbox::new("create-readme")
-                                        .label(tr!("repo.create.readme"))
-                                        .checked(readme_c.get())
-                                        .on_click(move |checked, window, _| {
-                                            readme_set.set(*checked);
-                                            window.refresh();
-                                        }),
-                                ),
+                                div()
+                                    .debug_selector(|| "create-readme".into())
+                                    .cursor_pointer()
+                                    .child(
+                                        Checkbox::new("create-readme")
+                                            .label(tr!("repo.create.readme"))
+                                            .checked(readme_c.get())
+                                            .on_click(move |checked, window, _| {
+                                                readme_set.set(*checked);
+                                                window.refresh();
+                                            }),
+                                    ),
                             )
                             .child(field(
                                 tr!("repo.create.gitignore"),
@@ -609,13 +612,17 @@ impl Workspace {
                                         ),
                                     )
                                     .child(if publishing {
-                                        Checkbox::new("create-private")
-                                            .label(tr!("repo.create.private"))
-                                            .checked(private_c.get())
-                                            .on_click(move |checked, window, _| {
-                                                private_set.set(*checked);
-                                                window.refresh();
-                                            })
+                                        div()
+                                            .cursor_pointer()
+                                            .child(
+                                                Checkbox::new("create-private")
+                                                    .label(tr!("repo.create.private"))
+                                                    .checked(private_c.get())
+                                                    .on_click(move |checked, window, _| {
+                                                        private_set.set(*checked);
+                                                        window.refresh();
+                                                    }),
+                                            )
                                             .into_any_element()
                                     } else {
                                         div()
@@ -654,9 +661,9 @@ impl Workspace {
         let parent = self.default_parent();
         let path = cx.new(|cx| InputState::new(window, cx).default_value(parent));
         let workspace = cx.entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, window, _| {
             let (path_c, path_f, ws_f) = (path.clone(), path.clone(), workspace.clone());
-            dialog
+            crate::ui::centered(dialog, window, 230.)
                 .title(tr!("repo.add.title"))
                 .w(px(DIALOG_WIDTH))
                 .content(move |content, _, cx| {
@@ -706,10 +713,10 @@ impl Workspace {
         let name = cx.new(|cx| InputState::new(window, cx));
         name.update(cx, |input, cx| input.focus(window, cx));
         let workspace = cx.entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, window, _| {
             let (name_c, name_f, ws_f) = (name.clone(), name.clone(), workspace.clone());
             let (based_on, from) = (based_on.clone(), from.clone());
-            dialog
+            crate::ui::centered(dialog, window, 240.)
                 .title(tr!("repo.branch.create_title"))
                 .w(px(DIALOG_WIDTH))
                 .content(move |content, _, cx| {
@@ -755,10 +762,10 @@ impl Workspace {
         let name = cx.new(|cx| InputState::new(window, cx).default_value(old.clone()));
         name.update(cx, |input, cx| input.focus(window, cx));
         let workspace = cx.entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, window, _| {
             let (name_c, name_f, ws_f, old_f) =
                 (name.clone(), name.clone(), workspace.clone(), old.clone());
-            dialog
+            crate::ui::centered(dialog, window, 240.)
                 .title(tr!("repo.branch.rename_title"))
                 .w(px(DIALOG_WIDTH))
                 .content(move |content, _, cx| {
@@ -794,9 +801,9 @@ impl Workspace {
             return;
         };
         let workspace = cx.entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, window, _| {
             let (ws_f, name_c, path_c) = (workspace.clone(), name.clone(), path.clone());
-            dialog
+            crate::ui::centered(dialog, window, 240.)
                 .title(tr!("repo.remove.title", name = name.clone()))
                 .w(px(DIALOG_WIDTH))
                 .content(move |content, _, cx| {
@@ -847,10 +854,10 @@ impl Workspace {
             .map_or_else(|| "HEAD".to_string(), |b| b.name.clone());
         let leave = Rc::new(Cell::new(true));
         let workspace = cx.entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, window, _| {
             let (leave_c, leave_f, ws_f) = (leave.clone(), leave.clone(), workspace.clone());
             let (current, target_c, target_f) = (current.clone(), target.clone(), target.clone());
-            dialog
+            crate::ui::centered(dialog, window, 240.)
                 .title(tr!("repo.branch.switch_title"))
                 .w(px(DIALOG_WIDTH))
                 .content(move |content, _, cx| {
@@ -994,7 +1001,7 @@ mod tests {
     /// This is the one that silently did nothing while the entries were a dropdown menu
     /// nested in the switcher popover.
     #[gpui_kit::test]
-    fn clicking_an_add_entry_in_the_switcher_opens_its_dialog(cx: &mut gpui_kit::TestAppContext) {
+    fn the_switcher_no_longer_lists_the_add_entries(cx: &mut gpui_kit::TestAppContext) {
         // git / gh work finishes on tokio's threads, outside the test scheduler.
         cx.executor().allow_parking();
         cx.update(|cx| {
@@ -1015,23 +1022,17 @@ mod tests {
         });
         cx.run_until_parked();
 
+        // They moved to the toolbar's "+": the switcher no longer lists them.
+        let trigger = cx
+            .debug_bounds("repo-switcher")
+            .expect("switcher is on screen");
+        cx.simulate_click(trigger.center(), gpui_kit::Modifiers::none());
+        cx.run_until_parked();
         for entry in ["repo-add-clone", "repo-add-create", "repo-add-existing"] {
-            let trigger = cx
-                .debug_bounds("repo-switcher")
-                .expect("switcher is on screen");
-            cx.simulate_click(trigger.center(), gpui_kit::Modifiers::none());
-            cx.run_until_parked();
-            let button = cx
-                .debug_bounds(entry)
-                .unwrap_or_else(|| panic!("{entry} isn't in the open switcher"));
-            cx.simulate_click(button.center(), gpui_kit::Modifiers::none());
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                assert!(window.has_active_dialog(cx), "{entry} opened no dialog");
-                assert!(!workspace.read(cx).switcher_open, "switcher stayed open");
-                window.close_dialog(cx);
-            });
-            cx.run_until_parked();
+            assert!(
+                cx.debug_bounds(entry).is_none(),
+                "{entry} is still in the switcher"
+            );
         }
     }
 

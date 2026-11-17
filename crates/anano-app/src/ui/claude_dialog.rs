@@ -576,9 +576,9 @@ impl Workspace {
     fn open_claude_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !window.has_active_dialog(cx) {
             let workspace = cx.entity();
-            window.open_dialog(cx, move |dialog, _, _| {
+            window.open_dialog(cx, move |dialog, window, _| {
                 let workspace = workspace.clone();
-                dialog
+                crate::ui::centered(dialog, window, 660.)
                     .title(tr!("repo.claude.dialog_title"))
                     .w(px(DIALOG_WIDTH))
                     // Closing it is a choice (Close): agents keep running behind it.

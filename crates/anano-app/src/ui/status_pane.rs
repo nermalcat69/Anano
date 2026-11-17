@@ -378,7 +378,7 @@ impl Workspace {
                 .into_any_element()
         };
         let body = match &self.diff {
-            None => message(tr!("repo.diff.loading"), muted),
+            None => crate::ui::skeleton_text(16),
             Some(Err(err)) => message(err.clone().into(), cx.theme().danger),
             Some(Ok(view)) if view.lines.is_empty() => message(tr!("repo.diff.empty"), muted),
             Some(Ok(view)) => {

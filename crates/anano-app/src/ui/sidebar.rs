@@ -20,7 +20,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::assets::{ICON_HISTORY, logo_path};
+use crate::assets::logo_path;
 use crate::brand::APP_NAME;
 use crate::i18n::tr;
 use crate::state::workspace::{Selected, SidebarTab, Workspace};
@@ -76,6 +76,17 @@ impl Workspace {
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(APP_NAME),
+                    )
+                    .child(
+                        // Reload: re-read the repository from disk (changes, history,
+                        // branches, ahead / behind) for when something changed that the
+                        // watcher can't see, e.g. on a network drive.
+                        crate::ui::button("sidebar-reload")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::empty().path(crate::assets::ICON_REFRESH).size_4())
+                            .tooltip(tr!("sidebar.reload"))
+                            .on_click(cx.listener(|this, _, _, cx| this.reload_active_repo(cx))),
                     )
                     .child(
                         // Settings sits here now, where the collapse button was. The sidebar
@@ -144,6 +155,7 @@ impl Workspace {
         div()
             .id("repo-switcher")
             .debug_selector(|| "repo-switcher".into())
+            .cursor_pointer()
             .flex_none()
             .px_2()
             .pt_1()
@@ -312,8 +324,6 @@ impl Workspace {
                                     .overflow_y_scroll()
                                     .children(rows),
                             )
-                            .child(div().h(px(1.)).bg(hover_bg))
-                            .child(render_add_repo_actions(workspace.clone()))
                     }),
             )
             .into_any_element()
@@ -376,8 +386,15 @@ impl Workspace {
                             .ghost()
                             .compact()
                             .flex_1()
-                            .icon(Icon::empty().path(ICON_HISTORY).size_4())
-                            .label(tr!("repo.tabs.history"))
+                            .child(
+                                h_flex()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .child(
+                                        img(crate::assets::EMOJI_HISTORY).size(px(16.)).flex_none(),
+                                    )
+                                    .child(tr!("repo.tabs.history")),
+                            )
                             .text_color(if tab == SidebarTab::History {
                                 fg
                             } else {
@@ -410,7 +427,7 @@ impl Workspace {
 
         if repo.commits.is_empty() {
             if repo.log_loading {
-                return div().flex_1().into_any_element();
+                return crate::ui::skeleton_list(9);
             }
             return v_flex()
                 .flex_1()
@@ -422,96 +439,120 @@ impl Workspace {
                 .into_any_element();
         }
 
-        let hover_bg = cx.theme().list_hover;
-        let active_bg = cx.theme().list_active;
-        let border = cx.theme().sidebar_border;
-        let origin = repo.origin.clone();
-        let workspace = cx.entity();
-        // GitHub Desktop's row: the summary, then who and how long ago under it.
-        let rows: Vec<AnyElement> = repo
-            .commits
-            .iter()
-            .map(|commit| {
-                let target = Selected::Commit(commit.id.clone());
-                let selected = self.selected() == Some(&target);
-                let picture = self.avatars.get(&commit.email).and_then(|p| p.as_ref());
-                let (sha, menu_ws) = (commit.id.clone(), workspace.clone());
-                let web_url = origin
-                    .as_deref()
-                    .and_then(|o| anano_core::external::commit_web_url(o, &commit.id));
-                v_flex()
-                    .id(SharedString::from(format!("commit-{}", commit.id)))
-                    .flex_none()
-                    .px_3()
-                    .py_2()
-                    .gap_1()
-                    .border_b_1()
-                    .border_color(border)
-                    .cursor_pointer()
-                    .when(selected, |row| row.bg(active_bg))
-                    .hover(move |style| style.bg(hover_bg))
-                    .aria_selected(selected)
-                    .on_click(cx.listener(move |this, _, _, cx| this.select(target.clone(), cx)))
-                    .context_menu(move |menu, _, _| {
-                        let (branch_ws, branch_sha) = (menu_ws.clone(), sha.clone());
-                        let copy_sha = sha.clone();
-                        let menu = menu
-                            .item(
-                                PopupMenuItem::new(tr!("repo.history.branch_from_commit"))
-                                    .on_click(move |_, window, cx| {
-                                        let sha = branch_sha.clone();
-                                        branch_ws.update(cx, |ws, cx| {
-                                            ws.open_new_branch_dialog(Some(sha), window, cx)
-                                        });
-                                    }),
-                            )
-                            .separator()
-                            .item(PopupMenuItem::new(tr!("repo.history.copy_sha")).on_click(
-                                move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        copy_sha.clone(),
-                                    ));
-                                },
-                            ));
-                        match web_url.clone() {
-                            Some(url) => menu.item(
-                                PopupMenuItem::new(tr!("repo.history.view_on_github"))
-                                    .on_click(move |_, _, cx| cx.open_url(&url)),
-                            ),
-                            None => menu,
-                        }
-                    })
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .truncate()
-                            .child(commit.summary.clone()),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_1p5()
-                            .items_center()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(crate::ui::avatar(picture, &commit.author, px(16.), cx))
-                            .child(div().min_w_0().truncate().child(format!(
-                                "{} • {}",
-                                commit.author,
-                                crate::ui::time_ago(commit.time)
-                            ))),
-                    )
-                    .into_any_element()
-            })
-            .collect();
-
-        v_flex()
-            .id("history-list")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .children(rows)
-            .into_any_element()
+        // Only the rows on screen are built: a long history used to build (and lay out, with
+        // a context menu each) every commit loaded so far on every frame.
+        let count = repo.commits.len();
+        uniform_list(
+            "history-list",
+            count,
+            cx.processor(
+                move |this: &mut Workspace, range: std::ops::Range<usize>, _, cx| {
+                    let Some(repo) = this.active_repo() else {
+                        return Vec::new();
+                    };
+                    let muted = cx.theme().muted_foreground;
+                    let hover_bg = cx.theme().list_hover;
+                    let active_bg = cx.theme().list_active;
+                    let border = cx.theme().sidebar_border;
+                    let origin = repo.origin.clone();
+                    let workspace = cx.entity();
+                    // GitHub Desktop's row: the summary, then who and how long ago under it.
+                    repo.commits
+                        .iter()
+                        .enumerate()
+                        .skip(range.start)
+                        .take(range.len())
+                        .map(|(_, commit)| {
+                            let target = Selected::Commit(commit.id.clone());
+                            let selected = this.selected() == Some(&target);
+                            let picture = this.avatars.get(&commit.email).and_then(|p| p.as_ref());
+                            let (sha, menu_ws) = (commit.id.clone(), workspace.clone());
+                            let web_url = origin
+                                .as_deref()
+                                .and_then(|o| anano_core::external::commit_web_url(o, &commit.id));
+                            v_flex()
+                                .id(SharedString::from(format!("commit-{}", commit.id)))
+                                .flex_none()
+                                .w_full()
+                                .overflow_hidden()
+                                .px_3()
+                                .py_2()
+                                .gap_1()
+                                .border_b_1()
+                                .border_color(border)
+                                .cursor_pointer()
+                                .when(selected, |row| row.bg(active_bg))
+                                .hover(move |style| style.bg(hover_bg))
+                                .aria_selected(selected)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.select(target.clone(), cx)
+                                }))
+                                .context_menu(move |menu, _, _| {
+                                    let (branch_ws, branch_sha) = (menu_ws.clone(), sha.clone());
+                                    let copy_sha = sha.clone();
+                                    let menu = menu
+                                        .item(
+                                            PopupMenuItem::new(tr!(
+                                                "repo.history.branch_from_commit"
+                                            ))
+                                            .on_click(move |_, window, cx| {
+                                                let sha = branch_sha.clone();
+                                                branch_ws.update(cx, |ws, cx| {
+                                                    ws.open_new_branch_dialog(Some(sha), window, cx)
+                                                });
+                                            }),
+                                        )
+                                        .separator()
+                                        .item(
+                                            PopupMenuItem::new(tr!("repo.history.copy_sha"))
+                                                .on_click(move |_, _, cx| {
+                                                    cx.write_to_clipboard(
+                                                        ClipboardItem::new_string(copy_sha.clone()),
+                                                    );
+                                                }),
+                                        );
+                                    match web_url.clone() {
+                                        Some(url) => menu.item(
+                                            PopupMenuItem::new(tr!("repo.history.view_on_github"))
+                                                .on_click(move |_, _, cx| cx.open_url(&url)),
+                                        ),
+                                        None => menu,
+                                    }
+                                })
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .truncate()
+                                        .child(commit.summary.clone()),
+                                )
+                                .child(
+                                    h_flex()
+                                        .gap_1p5()
+                                        .items_center()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(crate::ui::avatar(
+                                            picture,
+                                            &commit.author,
+                                            px(16.),
+                                            cx,
+                                        ))
+                                        .child(div().min_w_0().truncate().child(format!(
+                                            "{} • {}",
+                                            commit.author,
+                                            crate::ui::time_ago(commit.time)
+                                        ))),
+                                )
+                                .into_any_element()
+                        })
+                        .collect()
+                },
+            ),
+        )
+        .flex_1()
+        .min_h_0()
+        .into_any_element()
     }
 
     /// The Changes tab's list, GitHub Desktop style: one row per changed file with a
@@ -524,8 +565,6 @@ impl Workspace {
         };
         let muted = cx.theme().muted_foreground;
         let border = cx.theme().sidebar_border;
-        let hover_bg = cx.theme().list_hover;
-        let active_bg = cx.theme().list_active;
         let files = repo.changed_files();
         let checked = files.len() - repo.unchecked.len().min(files.len());
         let clean = files.is_empty() && !repo.loading && repo.error.is_none();
@@ -540,7 +579,6 @@ impl Workspace {
                 .child(tr!("repo.status.unreadable", path = path))
                 .child(div().text_xs().text_color(muted).child(error))
         });
-        let workspace = cx.entity();
 
         let header = (!files.is_empty()).then(|| {
             h_flex()
@@ -552,9 +590,11 @@ impl Workspace {
                 .border_b_1()
                 .border_color(border)
                 .child(
-                    Checkbox::new("changes-all")
-                        .checked(checked == files.len())
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_all_files(cx))),
+                    div().cursor_pointer().child(
+                        Checkbox::new("changes-all")
+                            .checked(checked == files.len())
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_all_files(cx))),
+                    ),
                 )
                 .child(div().text_sm().child(tr!(
                     "repo.status.changed_files",
@@ -597,131 +637,201 @@ impl Workspace {
                 )
         });
 
-        let rows: Vec<AnyElement> = files
-            .iter()
-            .enumerate()
-            .map(|(ix, (file, kind))| {
-                let (file, kind) = (file.clone(), *kind);
-                let menu_workspace = workspace.clone();
-                let menu_file = file.clone();
-                let toggle_file = file.clone();
-                let target = Selected::File { path: file.clone() };
-                let selected = self.selected() == Some(&target);
-                let ticked = !repo.unchecked.contains(&file);
-                h_flex()
-                    .id(("file-row", ix))
-                    .when(ix == 0, |row| {
-                        row.debug_selector(|| "first-file-row".into())
-                    })
-                    // Fixed height: a row in a scrolling list must not be squeezed when
-                    // the window gets short (flex children shrink by default), it scrolls.
-                    .flex_none()
-                    .h_9()
-                    .px_3()
-                    .gap_2()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(border)
-                    .cursor_pointer()
-                    .when(selected, |row| row.bg(active_bg))
-                    .hover(move |style| style.bg(hover_bg))
-                    .aria_selected(selected)
-                    .on_click(cx.listener(move |this, _, _, cx| this.select(target.clone(), cx)))
-                    .context_menu(move |menu, _, _| {
-                        let workspace = menu_workspace.clone();
-                        let file = menu_file.clone();
-                        let ext = std::path::Path::new(&file)
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .map(str::to_string);
-                        let menu = menu
-                            .item(
-                                PopupMenuItem::new(tr!("repo.context_menu.discard")).on_click({
-                                    let workspace = workspace.clone();
-                                    let file = file.clone();
-                                    move |_, _, cx| {
-                                        workspace.update(cx, |ws, cx| {
-                                            ws.discard_file_change(file.clone(), kind, cx)
-                                        });
-                                    }
-                                }),
-                            )
-                            .item(
-                                PopupMenuItem::new(tr!("repo.context_menu.ignore_file")).on_click(
-                                    {
-                                        let workspace = workspace.clone();
-                                        let file = file.clone();
-                                        move |_, _, cx| {
-                                            workspace.update(cx, |ws, cx| {
-                                                ws.ignore_file(file.clone(), cx)
-                                            });
-                                        }
-                                    },
-                                ),
-                            );
-                        let menu = if let Some(ext) = ext {
-                            menu.item(
-                                PopupMenuItem::new(tr!("repo.context_menu.ignore_ext", ext = ext))
-                                    .on_click({
-                                        let workspace = workspace.clone();
-                                        let file = file.clone();
-                                        move |_, _, cx| {
-                                            workspace.update(cx, |ws, cx| {
-                                                ws.ignore_file_extension(file.clone(), cx)
-                                            });
-                                        }
-                                    }),
-                            )
-                        } else {
-                            menu
-                        };
-                        menu.separator()
-                            .item(
-                                PopupMenuItem::new(tr!("repo.context_menu.copy_path")).on_click({
-                                    let workspace = workspace.clone();
-                                    let file = file.clone();
-                                    move |_, _, cx| {
-                                        workspace.update(cx, |ws, cx| ws.copy_file_path(&file, cx));
-                                    }
-                                }),
-                            )
-                            .item(
-                                PopupMenuItem::new(tr!("repo.context_menu.copy_relative_path"))
-                                    .on_click({
-                                        let workspace = workspace.clone();
-                                        let file = file.clone();
-                                        move |_, _, cx| {
-                                            workspace.update(cx, |ws, cx| {
-                                                ws.copy_relative_file_path(&file, cx)
-                                            });
-                                        }
-                                    }),
-                            )
-                    })
-                    .child(
-                        // Its own click target: ticking a file shouldn't also open it.
-                        div()
-                            .id(("file-tick", ix))
-                            .flex_none()
-                            .on_click(|_, _, cx| cx.stop_propagation())
-                            .child(Checkbox::new(("file-check", ix)).checked(ticked).on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    this.toggle_file(toggle_file.clone(), cx)
-                                }),
-                            )),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_sm()
-                            .truncate()
-                            .child(file.clone()),
-                    )
-                    .child(kind_badge(kind, cx))
-                    .into_any_element()
-            })
-            .collect();
+        // Only the rows on screen are built, laid out and painted: a long list of changed files
+        // (a first commit, a rename of a folder) used to cost every row on every scroll frame.
+        let file_count = files.len();
+        let rows = uniform_list(
+            "changes-rows",
+            file_count,
+            cx.processor(
+                move |this: &mut Workspace, range: std::ops::Range<usize>, _, cx| {
+                    let Some(repo) = this.active_repo() else {
+                        return Vec::new();
+                    };
+                    let files = repo.changed_files();
+                    let theme = cx.theme();
+                    let (hover_bg, active_bg, border) =
+                        (theme.list_hover, theme.list_active, theme.sidebar_border);
+                    let workspace = cx.entity();
+                    files
+                        .iter()
+                        .enumerate()
+                        .skip(range.start)
+                        .take(range.len())
+                        .map(|(ix, (file, kind))| {
+                            let (file, kind) = (file.clone(), *kind);
+                            let menu_workspace = workspace.clone();
+                            let menu_file = file.clone();
+                            let toggle_file = file.clone();
+                            let target = Selected::File { path: file.clone() };
+                            let selected = this.selected() == Some(&target);
+                            let ticked = !repo.unchecked.contains(&file);
+                            h_flex()
+                                .id(("file-row", ix))
+                                .when(ix == 0, |row| {
+                                    row.debug_selector(|| "first-file-row".into())
+                                })
+                                // Fixed height: a row in a scrolling list must not be squeezed when
+                                // the window gets short (flex children shrink by default), it scrolls.
+                                .flex_none()
+                                // Every row as wide as the list, whatever its text: a virtualised list sizes rows to
+                                // their content unless told otherwise (each row a different width, badge off the edge).
+                                .w_full()
+                                .overflow_hidden()
+                                .h_9()
+                                .px_3()
+                                .gap_2()
+                                .items_center()
+                                .border_b_1()
+                                .border_color(border)
+                                .cursor_pointer()
+                                .when(selected, |row| row.bg(active_bg))
+                                .hover(move |style| style.bg(hover_bg))
+                                .aria_selected(selected)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.select(target.clone(), cx)
+                                }))
+                                .context_menu(move |menu, _, _| {
+                                    let workspace = menu_workspace.clone();
+                                    let file = menu_file.clone();
+                                    let ext = std::path::Path::new(&file)
+                                        .extension()
+                                        .and_then(|e| e.to_str())
+                                        .map(str::to_string);
+                                    let menu = menu
+                                        .item(
+                                            PopupMenuItem::new(tr!("repo.context_menu.discard"))
+                                                .on_click({
+                                                    let workspace = workspace.clone();
+                                                    let file = file.clone();
+                                                    move |_, _, cx| {
+                                                        workspace.update(cx, |ws, cx| {
+                                                            ws.discard_file_change(
+                                                                file.clone(),
+                                                                kind,
+                                                                cx,
+                                                            )
+                                                        });
+                                                    }
+                                                }),
+                                        )
+                                        .item(
+                                            PopupMenuItem::new(tr!(
+                                                "repo.context_menu.ignore_file"
+                                            ))
+                                            .on_click({
+                                                let workspace = workspace.clone();
+                                                let file = file.clone();
+                                                move |_, _, cx| {
+                                                    workspace.update(cx, |ws, cx| {
+                                                        ws.ignore_file(file.clone(), cx)
+                                                    });
+                                                }
+                                            }),
+                                        );
+                                    let menu = if let Some(ext) = ext {
+                                        menu.item(
+                                            PopupMenuItem::new(tr!(
+                                                "repo.context_menu.ignore_ext",
+                                                ext = ext
+                                            ))
+                                            .on_click({
+                                                let workspace = workspace.clone();
+                                                let file = file.clone();
+                                                move |_, _, cx| {
+                                                    workspace.update(cx, |ws, cx| {
+                                                        ws.ignore_file_extension(file.clone(), cx)
+                                                    });
+                                                }
+                                            }),
+                                        )
+                                    } else {
+                                        menu
+                                    };
+                                    menu.separator()
+                                        .item(
+                                            PopupMenuItem::new(tr!("repo.context_menu.copy_path"))
+                                                .on_click({
+                                                    let workspace = workspace.clone();
+                                                    let file = file.clone();
+                                                    move |_, _, cx| {
+                                                        workspace.update(cx, |ws, cx| {
+                                                            ws.copy_file_path(&file, cx)
+                                                        });
+                                                    }
+                                                }),
+                                        )
+                                        .item(
+                                            PopupMenuItem::new(tr!(
+                                                "repo.context_menu.copy_relative_path"
+                                            ))
+                                            .on_click({
+                                                let workspace = workspace.clone();
+                                                let file = file.clone();
+                                                move |_, _, cx| {
+                                                    workspace.update(cx, |ws, cx| {
+                                                        ws.copy_relative_file_path(&file, cx)
+                                                    });
+                                                }
+                                            }),
+                                        )
+                                })
+                                .child(
+                                    // Its own click target: ticking a file shouldn't also open it.
+                                    div()
+                                        .id(("file-tick", ix))
+                                        .flex_none()
+                                        .cursor_pointer()
+                                        .on_click(|_, _, cx| cx.stop_propagation())
+                                        .child(
+                                            Checkbox::new(("file-check", ix))
+                                                .checked(ticked)
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.toggle_file(toggle_file.clone(), cx)
+                                                })),
+                                        ),
+                                )
+                                .child({
+                                    // The file's name first (it is what you look for), then its
+                                    // folder, muted; the folder gives way (ellipsis) when narrow.
+                                    let (dir, name) = match file.rsplit_once('/') {
+                                        Some((dir, name)) => (format!("{dir}/"), name.to_string()),
+                                        None => (String::new(), file.clone()),
+                                    };
+                                    h_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .gap_1p5()
+                                        .overflow_hidden()
+                                        .items_baseline()
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .max_w_full()
+                                                .truncate()
+                                                .text_sm()
+                                                .child(name),
+                                        )
+                                        .when(!dir.is_empty(), |h| {
+                                            h.child(
+                                                div()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(dir),
+                                            )
+                                        })
+                                })
+                                .child(kind_badge(kind, cx))
+                                .into_any_element()
+                        })
+                        .collect()
+                },
+            ),
+        )
+        .flex_1()
+        .min_h_0();
 
         v_flex()
             .id("changes")
@@ -730,23 +840,16 @@ impl Workspace {
             .children(error)
             .children(banner)
             .children(header)
-            .child(
-                v_flex()
-                    .id("changes-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .children(rows)
-                    .when(clean, |d| {
-                        d.child(
-                            div()
-                                .p_3()
-                                .text_sm()
-                                .text_color(muted)
-                                .child(tr!("repo.status.clean")),
-                        )
-                    }),
-            )
+            .child(rows)
+            .when(clean, |d| {
+                d.child(
+                    div()
+                        .p_3()
+                        .text_sm()
+                        .text_color(muted)
+                        .child(tr!("repo.status.clean")),
+                )
+            })
             .into_any_element()
     }
 
@@ -814,10 +917,22 @@ impl Workspace {
             )
             .child(
                 crate::ui::button("commit")
-                    .primary()
+                    .custom(crate::ui::accent_button(
+                        cx,
+                        crate::ui::AccentButton::Commit,
+                    ))
+                    .border_1()
+                    .border_color(crate::ui::accent_colors(cx, crate::ui::AccentButton::Commit).1)
                     .w_full()
                     .disabled(count == 0 || !has_summary)
-                    .label(label)
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .justify_center()
+                            .child(img(crate::assets::EMOJI_PUSH).size(px(18.)).flex_none())
+                            .child(label),
+                    )
                     .on_click(cx.listener(|this, _, window, cx| this.commit_active(window, cx))),
             )
     }
