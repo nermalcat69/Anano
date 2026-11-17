@@ -86,7 +86,10 @@ pub enum Selected {
 
 pub struct Workspace {
     /// The Claude Code run (or the prompt waiting to be run) behind the dialog.
-    pub(crate) claude: Option<crate::ui::claude_dialog::ClaudeSession>,
+    /// Every Claude Code agent started here (running, finished, or the prompt being written).
+    pub(crate) claude: Vec<crate::ui::claude_dialog::ClaudeSession>,
+    pub(crate) claude_active: usize,
+    pub(crate) claude_next_id: u64,
     pub(crate) claude_input: Entity<TextareaState>,
     pub(crate) claude_scroll: ScrollHandle,
     /// The account view (repositories, organizations, commit history of an account's
@@ -129,6 +132,8 @@ pub struct Workspace {
     /// `None` while the diff for `selected` is loading.
     pub(crate) diff: Option<Result<Rc<DiffView>, String>>,
     pub(crate) diff_scroll: UniformListScrollHandle,
+    /// Before/after pictures of the selected change when it touches images.
+    pub(crate) images: Vec<anano_core::git::ImagePair>,
     /// Repositories each connected account can clone; filled on demand by the clone dialog.
     pub(crate) account_repos: HashMap<String, Result<Vec<external::Repo>, String>>,
     /// Git Ignore / License choices for the create dialog; fetched the first time it opens.
@@ -202,7 +207,9 @@ impl Workspace {
                 .placeholder(tr!("repo.claude.prompt_placeholder"))
         });
         let mut ws = Self {
-            claude: None,
+            claude: Vec::new(),
+            claude_active: 0,
+            claude_next_id: 0,
             claude_input: claude_input.clone(),
             claude_scroll: ScrollHandle::new(),
             account: None,
@@ -228,6 +235,7 @@ impl Workspace {
             selected: None,
             diff: None,
             diff_scroll: UniformListScrollHandle::new(),
+            images: Vec::new(),
             account_repos: HashMap::new(),
             templates: None,
             accounts: Vec::new(),
@@ -799,6 +807,7 @@ impl Workspace {
         self.account = None;
         if self.selected.as_ref() != Some(&selected) {
             self.diff = None;
+            self.images.clear();
             self.diff_scroll.scroll_to_item(0, ScrollStrategy::Top);
         }
         self.selected = Some(selected);
@@ -824,13 +833,16 @@ impl Workspace {
             return;
         };
         let task = bridge::diff(cx, repo.entry.path.clone(), selected.clone());
+        let images = bridge::images(cx, repo.entry.path.clone(), selected.clone());
         cx.spawn(async move |ws, cx| {
             let result = task.await;
+            let images = images.await.unwrap_or_default();
             let _ = ws.update(cx, |ws, cx| {
                 // The user may have clicked something else while this was loading.
                 if ws.selected.as_ref() != Some(&selected) {
                     return;
                 }
+                ws.images = images;
                 ws.diff = Some(match result {
                     Ok(Ok(view)) => Ok(Rc::new(view)),
                     Ok(Err(err)) => Err(err.to_string()),

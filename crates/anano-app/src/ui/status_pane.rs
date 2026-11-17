@@ -22,6 +22,7 @@ use crate::state::workspace::{Selected, Workspace};
 const ROW_HEIGHT: f32 = 20.;
 const GUTTER_WIDTH: f32 = 44.;
 const FILES_WIDTH: f32 = 240.;
+const IMAGE_HEIGHT: f32 = 240.;
 
 pub(crate) fn diff_row(ix: usize, line: &DiffLine, cx: &App) -> AnyElement {
     let theme = cx.theme();
@@ -82,7 +83,127 @@ pub(crate) fn diff_row(ix: usize, line: &DiffLine, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
+fn file_size(path: &std::path::Path) -> String {
+    let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if bytes >= 1 << 20 {
+        format!("{:.1} MB", bytes as f64 / (1 << 20) as f64)
+    } else {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    }
+}
+
+/// One side of an image diff: a label, the picture on a neutral backdrop, and its size.
+fn image_side(
+    label: SharedString,
+    path: Option<&std::path::PathBuf>,
+    tint: gpui_kit::Hsla,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    v_flex()
+        .flex_1()
+        .min_w_0()
+        .gap_1()
+        .child(
+            h_flex()
+                .gap_2()
+                .text_xs()
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(tint)
+                        .child(label),
+                )
+                .children(
+                    path.map(|p| div().text_color(theme.muted_foreground).child(file_size(p))),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .h(px(IMAGE_HEIGHT))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.secondary)
+                .overflow_hidden()
+                .child(match path {
+                    Some(p) => gpui_kit::img(p.clone())
+                        .max_w_full()
+                        .max_h(px(IMAGE_HEIGHT - 8.))
+                        .into_any_element(),
+                    None => div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(tr!("repo.diff.image_none"))
+                        .into_any_element(),
+                }),
+        )
+        .into_any_element()
+}
+
 impl Workspace {
+    /// Above the text diff: for every changed image, before and after side by side.
+    fn render_image_diff(&self, cx: &App) -> Option<AnyElement> {
+        if self.images.is_empty() {
+            return None;
+        }
+        let theme = cx.theme();
+        let (border, success, danger) = (theme.border, theme.success, theme.danger);
+        Some(
+            v_flex()
+                .id("image-diff")
+                .flex_none()
+                .max_h(px(IMAGE_HEIGHT * 1.6))
+                .overflow_y_scroll()
+                .gap_3()
+                .p_3()
+                .border_b_1()
+                .border_color(border)
+                .children(self.images.iter().map(|pair| {
+                    v_flex()
+                        .gap_2()
+                        .when(self.images.len() > 1, |v| {
+                            v.child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(pair.path.clone()),
+                            )
+                        })
+                        .child(
+                            h_flex()
+                                .gap_3()
+                                .items_start()
+                                .child(image_side(
+                                    if pair.old.is_none() {
+                                        tr!("repo.diff.image_added_old")
+                                    } else {
+                                        tr!("repo.diff.image_before")
+                                    },
+                                    pair.old.as_ref(),
+                                    danger,
+                                    cx,
+                                ))
+                                .child(image_side(
+                                    if pair.new.is_none() {
+                                        tr!("repo.diff.image_deleted")
+                                    } else {
+                                        tr!("repo.diff.image_after")
+                                    },
+                                    pair.new.as_ref(),
+                                    success,
+                                    cx,
+                                )),
+                        )
+                        .into_any_element()
+                }))
+                .into_any_element(),
+        )
+    }
+
     fn render_open_in_nermal(&self, cx: &mut Context<Self>) -> Option<Button> {
         self.nermal_available.then(|| {
             crate::ui::button("open-in-nermal")
@@ -317,6 +438,8 @@ impl Workspace {
                     .into_any_element()
             }
         };
-        pane.child(header).child(body)
+        pane.child(header)
+            .children(self.render_image_diff(cx))
+            .child(body)
     }
 }

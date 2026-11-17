@@ -817,6 +817,16 @@ repo:
   main_placeholder:
     en: Select a file to see its diff
   diff:
+    image_before:
+      en: Before
+    image_after:
+      en: After
+    image_added_old:
+      en: Before (new image)
+    image_deleted:
+      en: After (deleted)
+    image_none:
+      en: Nothing
     loading:
       en: Loading diff…
     empty:
@@ -1152,6 +1162,22 @@ repo:
       en: "Fix conflicts of pull request #%{number} with Claude Code"
     where:
       en: "Runs in %{path}"
+    where_branch:
+      en: "Own branch %{branch}, in its own working copy: your checkout isn't touched"
+    where_new_branch:
+      en: Starts on a new branch in its own working copy (your checkout isn't touched) and opens a pull request
+    new_agent:
+      en: "+ New agent"
+    keeps_running:
+      en: Closing this keeps the agent running.
+    dialog_title:
+      en: Claude Code
+    agent_title:
+      en: New agent
+    open_title:
+      en: Open Claude Code
+    open_body:
+      en: Describe a change. Claude Code makes it on its own branch and opens a pull request. Start several agents to work on several pull requests at once.
     warning:
       en: Claude Code will edit files in this repository and run git commands there. It is told not to push. It can't ask questions while it works, and you can stop it at any time.
     not_installed:

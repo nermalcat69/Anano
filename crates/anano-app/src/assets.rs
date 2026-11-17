@@ -52,6 +52,8 @@ pub const ICON_HISTORY: &str = "icons/history.svg";
 /// Clone dialog: private / public repository rows and the "refresh list" button.
 pub const ICON_LOCK: &str = "icons/lock.svg";
 pub const ICON_BOOK: &str = "icons/book.svg";
+/// The Claude Code mark (drawn in its own colour where it is used).
+pub const ICON_CLAUDE: &str = "icons/claude.svg";
 pub const ICON_REFRESH: &str = "icons/refresh-cw.svg";
 /// Toolbar: the Pull Requests button.
 pub const ICON_PULL_REQUEST: &str = "icons/git-pull-request.svg";
@@ -78,6 +80,7 @@ const ASSETS: &[(&str, &[u8])] = &[
     ),
     (ICON_LOCK, include_bytes!("../assets/icons/lock.svg")),
     (ICON_BOOK, include_bytes!("../assets/icons/book.svg")),
+    (ICON_CLAUDE, include_bytes!("../assets/icons/claude.svg")),
     (
         ICON_REFRESH,
         include_bytes!("../assets/icons/refresh-cw.svg"),

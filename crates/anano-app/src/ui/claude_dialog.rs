@@ -8,8 +8,9 @@
 use std::path::PathBuf;
 
 use anano_core::claude::{ClaudeHandle, ClaudeLine};
+use gpui_kit::AppContext as _;
 use gpui_kit::component::{
-    ActiveTheme, Disableable, WindowExt,
+    ActiveTheme, Disableable, Sizable, WindowExt,
     button::ButtonVariants,
     h_flex,
     input::{InputEvent, Textarea},
@@ -36,9 +37,18 @@ pub enum ClaudePhase {
 }
 
 pub struct ClaudeSession {
-    /// What this run is for, in the dialog's title.
+    pub id: u64,
+    /// What this run is for: the tab's name and the dialog's title.
     pub title: SharedString,
+    /// The repository it was started from.
+    pub repo: PathBuf,
+    pub slug: Option<String>,
+    /// Runs in its own branch and working copy (made when it starts) and opens pull
+    /// requests; otherwise it works in the repository's own folder.
+    pub isolated: bool,
+    /// Where it runs: the repository, or its own working copy once started.
     pub dir: PathBuf,
+    pub branch: Option<String>,
     pub phase: ClaudePhase,
     pub lines: Vec<ClaudeLine>,
     pub handle: Option<ClaudeHandle>,
@@ -167,24 +177,79 @@ fn line_row(ix: usize, line: &ClaudeLine, cx: &App) -> AnyElement {
     }
 }
 
-/// The dialog's content, rebuilt from the session each frame.
+/// The dialog's content, rebuilt from the sessions each frame: a tab per agent, then the
+/// selected agent's prompt (before it runs) or its log.
 fn claude_body(workspace: &Entity<Workspace>, cx: &mut App) -> AnyElement {
     let ws = workspace.read(cx);
-    let Some(session) = &ws.claude else {
+    let Some(session) = ws.claude.get(ws.claude_active) else {
         return div().into_any_element();
     };
-    let (phase, error) = (session.phase, session.error.clone());
+    let (phase, error, id) = (session.phase, session.error.clone(), session.id);
     let lines = session.lines.clone();
-    let dir = session.dir.display().to_string();
+    let place = match &session.branch {
+        Some(branch) => tr!("repo.claude.where_branch", branch = branch.clone()),
+        None if session.isolated => tr!("repo.claude.where_new_branch"),
+        None => tr!(
+            "repo.claude.where",
+            path = session.dir.display().to_string()
+        ),
+    };
+    let tabs: Vec<(u64, SharedString, ClaudePhase, bool)> = ws
+        .claude
+        .iter()
+        .enumerate()
+        .map(|(ix, s)| (s.id, s.title.clone(), s.phase, ix == ws.claude_active))
+        .collect();
     let installed = anano_core::claude::find_claude().is_some();
     let (input, scroll) = (ws.claude_input.clone(), ws.claude_scroll.clone());
     let theme = cx.theme();
-    let (muted, danger, border) = (theme.muted_foreground, theme.danger, theme.border);
+    let (muted, danger, border, active, success) = (
+        theme.muted_foreground,
+        theme.danger,
+        theme.border,
+        theme.list_active,
+        theme.success,
+    );
 
-    let place = div()
-        .text_xs()
-        .text_color(muted)
-        .child(tr!("repo.claude.where", path = dir));
+    let tab_row = h_flex()
+        .gap_1()
+        .flex_wrap()
+        .children(tabs.into_iter().map(|(tab_id, title, phase, selected)| {
+            let ws_tab = workspace.clone();
+            let dot = match phase {
+                ClaudePhase::Running => theme.warning,
+                ClaudePhase::Finished => success,
+                ClaudePhase::Ready => muted,
+            };
+            h_flex()
+                .id(("claude-tab", tab_id as usize))
+                .gap_1p5()
+                .items_center()
+                .px_2()
+                .py_1()
+                .max_w(px(220.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(border)
+                .cursor_pointer()
+                .when(selected, |t| t.bg(active))
+                .child(div().flex_none().size(px(8.)).rounded_full().bg(dot))
+                .child(div().min_w_0().truncate().text_xs().child(title))
+                .on_click(move |_, window, cx| {
+                    ws_tab.update(cx, |ws, cx| ws.select_claude_tab(tab_id, window, cx))
+                })
+        }))
+        .child({
+            let ws_new = workspace.clone();
+            crate::ui::button("claude-new-agent")
+                .ghost()
+                .xsmall()
+                .label(tr!("repo.claude.new_agent"))
+                .on_click(move |_, window, cx| {
+                    ws_new.update(cx, |ws, cx| ws.new_claude_agent(window, cx))
+                })
+        });
+    let place = div().text_xs().text_color(muted).child(place);
     let ws_run = workspace.clone();
     let ws_stop = workspace.clone();
 
@@ -237,35 +302,47 @@ fn claude_body(workspace: &Entity<Workspace>, cx: &mut App) -> AnyElement {
     };
     let buttons = h_flex()
         .gap_2()
-        .justify_end()
-        .child(match phase {
-            ClaudePhase::Running => crate::ui::button("claude-stop")
-                .outline()
-                .label(tr!("repo.claude.stop"))
-                .on_click(move |_, _, cx| ws_stop.update(cx, |ws, cx| ws.stop_claude(cx)))
-                .into_any_element(),
-            _ => crate::ui::button("claude-close")
-                .outline()
-                .label(if phase == ClaudePhase::Finished {
-                    tr!("repo.claude.close")
-                } else {
-                    tr!("common.cancel")
-                })
-                .on_click(|_, window, cx| window.close_dialog(cx))
-                .into_any_element(),
+        .items_center()
+        .child(
+            div()
+                .flex_1()
+                .text_xs()
+                .text_color(muted)
+                .when(phase == ClaudePhase::Running, |d| {
+                    d.child(tr!("repo.claude.keeps_running"))
+                }),
+        )
+        .when(phase == ClaudePhase::Running, |h| {
+            h.child(
+                crate::ui::button("claude-stop")
+                    .outline()
+                    .label(tr!("repo.claude.stop"))
+                    .on_click(move |_, window, cx| {
+                        ws_stop.update(cx, |ws, cx| ws.stop_claude(id, window, cx))
+                    }),
+            )
         })
+        .child(
+            crate::ui::button("claude-close")
+                .outline()
+                .label(tr!("repo.claude.close"))
+                .on_click(|_, window, cx| window.close_dialog(cx)),
+        )
         .when(phase == ClaudePhase::Ready, |h| {
             h.child(
                 crate::ui::button("claude-run")
                     .primary()
                     .label(tr!("repo.claude.run"))
                     .disabled(!installed)
-                    .on_click(move |_, _, cx| ws_run.update(cx, |ws, cx| ws.run_claude(cx))),
+                    .on_click(move |_, window, cx| {
+                        ws_run.update(cx, |ws, cx| ws.run_claude(window, cx))
+                    }),
             )
         });
     v_flex()
         .gap_3()
         .py_1()
+        .child(tab_row)
         .child(place)
         .child(main)
         .child(buttons)
@@ -273,8 +350,85 @@ fn claude_body(workspace: &Entity<Workspace>, cx: &mut App) -> AnyElement {
 }
 
 impl Workspace {
-    /// Open the dialog with `prompt` ready to run in the open repository. A run still going
-    /// from before is shown instead of being replaced.
+    /// The one agent whose prompt is still being written, if any.
+    fn claude_draft(&self) -> Option<usize> {
+        self.claude
+            .iter()
+            .position(|s| s.phase == ClaudePhase::Ready)
+    }
+
+    /// Show the dialog with a prompt ready to run (replacing a draft not yet run; agents
+    /// already running or finished keep their tabs).
+    fn show_claude_draft(
+        &mut self,
+        title: SharedString,
+        prompt: String,
+        isolated: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(repo) = self.active_repo() else {
+            return;
+        };
+        let (dir, slug) = (
+            repo.entry.path.clone(),
+            repo.origin
+                .as_deref()
+                .and_then(anano_core::external::repo_slug),
+        );
+        let ix = match self.claude_draft() {
+            Some(ix) => ix,
+            None => {
+                self.claude_next_id += 1;
+                self.claude.push(ClaudeSession {
+                    id: self.claude_next_id,
+                    title: SharedString::default(),
+                    repo: dir.clone(),
+                    slug: slug.clone(),
+                    isolated,
+                    dir: dir.clone(),
+                    branch: None,
+                    phase: ClaudePhase::Ready,
+                    lines: Vec::new(),
+                    handle: None,
+                    error: None,
+                });
+                self.claude.len() - 1
+            }
+        };
+        let session = &mut self.claude[ix];
+        (
+            session.title,
+            session.isolated,
+            session.repo,
+            session.slug,
+            session.dir,
+        ) = (title, isolated, dir.clone(), slug, dir);
+        session.error = None;
+        self.claude_active = ix;
+        self.claude_input
+            .update(cx, |input, cx| input.set_value(prompt, window, cx));
+        self.open_claude_window(window, cx);
+    }
+
+    /// Open the dialog itself (once); it follows `self.claude` from then on.
+    fn open_claude_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !window.has_active_dialog(cx) {
+            let workspace = cx.entity();
+            window.open_dialog(cx, move |dialog, _, _| {
+                let workspace = workspace.clone();
+                dialog
+                    .title(tr!("repo.claude.dialog_title"))
+                    .w(px(DIALOG_WIDTH))
+                    // Closing it is a choice (Close): agents keep running behind it.
+                    .overlay_closable(false)
+                    .content(move |content, _, cx| content.child(claude_body(&workspace, cx)))
+            });
+        }
+        window.refresh();
+        cx.notify();
+    }
+
     pub fn open_claude_dialog(
         &mut self,
         title: SharedString,
@@ -282,75 +436,140 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if window.has_active_dialog(cx) {
-            return;
-        }
-        let Some(dir) = self.active_repo().map(|r| r.entry.path.clone()) else {
-            return;
-        };
-        let running = self
-            .claude
-            .as_ref()
-            .is_some_and(|s| s.phase == ClaudePhase::Running);
-        let title = if running {
-            self.claude
-                .as_ref()
-                .map(|s| s.title.clone())
-                .unwrap_or(title)
-        } else {
-            self.claude = Some(ClaudeSession {
-                title: title.clone(),
-                dir,
-                phase: ClaudePhase::Ready,
-                lines: Vec::new(),
-                handle: None,
-                error: None,
-            });
-            self.claude_input
-                .update(cx, |input, cx| input.set_value(prompt, window, cx));
-            title
-        };
-        let workspace = cx.entity();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let workspace = workspace.clone();
-            dialog
-                .title(title.clone())
-                .w(px(DIALOG_WIDTH))
-                // Closing it must be a choice: a run in progress has Stop.
-                .overlay_closable(false)
-                .content(move |content, _, cx| content.child(claude_body(&workspace, cx)))
-        });
+        self.show_claude_draft(title, prompt, false, window, cx);
     }
 
-    /// "Run Claude Code": start it with whatever the prompt box now says.
-    pub fn run_claude(&mut self, cx: &mut Context<Self>) {
+    /// "Open Claude Code" on the No local changes page: an agent that makes its own branch,
+    /// does what you ask and opens a pull request.
+    pub fn open_claude_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.claude_draft().is_none() {
+            self.show_claude_draft(
+                tr!("repo.claude.agent_title"),
+                String::new(),
+                true,
+                window,
+                cx,
+            );
+        } else if let Some(ix) = self.claude_draft() {
+            // A draft is waiting (maybe a conflict fix): the new agent is its own tab.
+            if !self.claude[ix].isolated {
+                self.claude[ix].phase = ClaudePhase::Finished;
+                self.claude[ix]
+                    .lines
+                    .push(ClaudeLine::Note("Not started".into()));
+                self.show_claude_draft(
+                    tr!("repo.claude.agent_title"),
+                    String::new(),
+                    true,
+                    window,
+                    cx,
+                );
+            } else {
+                self.claude_active = ix;
+                self.open_claude_window(window, cx);
+            }
+        }
+    }
+
+    pub fn new_claude_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_claude_agent(window, cx);
+    }
+
+    pub fn select_claude_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.claude.iter().position(|s| s.id == id) {
+            self.claude_active = ix;
+            window.refresh();
+            cx.notify();
+        }
+    }
+
+    /// "Run Claude Code": start the selected agent with whatever the prompt box says. An
+    /// isolated agent first gets its own branch and working copy.
+    pub fn run_claude(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let prompt = self.claude_input.read(cx).value().trim().to_string();
-        let Some(session) = &mut self.claude else {
+        let Some(session) = self.claude.get_mut(self.claude_active) else {
             return;
         };
         if prompt.is_empty() || session.phase != ClaudePhase::Ready {
             return;
         }
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ClaudeLine>();
-        match anano_core::claude::spawn(&session.dir, &prompt, move |line| {
-            let _ = tx.send(line);
-        }) {
-            Ok(handle) => {
-                session.phase = ClaudePhase::Running;
-                session.handle = Some(handle);
-                session.error = None;
-            }
-            Err(err) => {
-                session.error = Some(err);
-                cx.notify();
-                return;
-            }
+        session.phase = ClaudePhase::Running;
+        session.error = None;
+        session.title = prompt
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(40)
+            .collect::<String>()
+            .into();
+        let (id, isolated, repo, slug) = (
+            session.id,
+            session.isolated,
+            session.repo.clone(),
+            session.slug.clone(),
+        );
+        let branch = format!(
+            "claude/task-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs())
+        );
+        if isolated {
+            session.lines.push(ClaudeLine::Note(format!(
+                "Creating branch {branch} in its own working copy…"
+            )));
         }
+        window.refresh();
         cx.notify();
-        cx.spawn(async move |ws, cx| {
+        let make = isolated.then(|| {
+            let (repo, branch) = (repo.clone(), branch.clone());
+            cx.background_spawn(async move { anano_core::claude::create_worktree(&repo, &branch) })
+        });
+        cx.spawn_in(window, async move |ws, cx| {
+            let dir = match make {
+                Some(task) => match task.await {
+                    Ok(dir) => dir,
+                    Err(err) => {
+                        let _ = ws.update_in(cx, |ws, window, cx| {
+                            ws.finish_claude_failed(id, err, window, cx)
+                        });
+                        return;
+                    }
+                },
+                None => repo.clone(),
+            };
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ClaudeLine>();
+            let system =
+                isolated.then(|| anano_core::claude::agent_system_prompt(slug.as_deref(), &branch));
+            let started =
+                anano_core::claude::spawn(&dir, &prompt, system.as_deref(), move |line| {
+                    let _ = tx.send(line);
+                });
+            match started {
+                Ok(handle) => {
+                    let _ = ws.update_in(cx, |ws, window, cx| {
+                        if let Some(s) = ws.claude.iter_mut().find(|s| s.id == id) {
+                            s.handle = Some(handle);
+                            s.dir = dir;
+                            s.branch = isolated.then(|| branch.clone());
+                        }
+                        window.refresh();
+                        cx.notify();
+                    });
+                }
+                Err(err) => {
+                    let _ = ws.update_in(cx, |ws, window, cx| {
+                        ws.finish_claude_failed(id, err, window, cx)
+                    });
+                    return;
+                }
+            }
             while let Some(line) = rx.recv().await {
                 let done = matches!(line, ClaudeLine::Done { .. });
-                let _ = ws.update(cx, |ws, cx| ws.push_claude_line(line, cx));
+                let _ = ws.update_in(cx, |ws, window, cx| {
+                    ws.push_claude_line(id, line, window, cx)
+                });
                 if done {
                     break;
                 }
@@ -359,8 +578,33 @@ impl Workspace {
         .detach();
     }
 
-    fn push_claude_line(&mut self, line: ClaudeLine, cx: &mut Context<Self>) {
-        let Some(session) = &mut self.claude else {
+    fn finish_claude_failed(
+        &mut self,
+        id: u64,
+        err: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.push_claude_line(
+            id,
+            ClaudeLine::Done {
+                ok: false,
+                text: err,
+                seconds: 0.0,
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn push_claude_line(
+        &mut self,
+        id: u64,
+        line: ClaudeLine,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.claude.iter_mut().find(|s| s.id == id) else {
             return;
         };
         let done = matches!(line, ClaudeLine::Done { .. });
@@ -374,13 +618,20 @@ impl Workspace {
             self.refresh_active_branches(cx);
         }
         self.claude_scroll.scroll_to_bottom();
+        window.refresh();
         cx.notify();
     }
 
-    pub fn stop_claude(&mut self, cx: &mut Context<Self>) {
-        if let Some(handle) = self.claude.as_ref().and_then(|s| s.handle.as_ref()) {
+    pub fn stop_claude(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(handle) = self
+            .claude
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.handle.as_ref())
+        {
             handle.stop();
         }
+        window.refresh();
         cx.notify();
     }
 

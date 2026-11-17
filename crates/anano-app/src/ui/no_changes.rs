@@ -290,6 +290,52 @@ impl Workspace {
                     .child(row)
             }));
 
+        // ---- Claude Code: describe a change, get a pull request
+        let claude_orange = gpui_kit::rgb(0xD97757);
+        let logo = || {
+            gpui_kit::component::Icon::empty()
+                .path(crate::assets::ICON_CLAUDE)
+                .size_5()
+                .text_color(claude_orange)
+        };
+        let claude = h_flex()
+            .gap_6()
+            .px_6()
+            .py_5()
+            .items_center()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(border)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        h_flex().gap_2().items_center().child(logo()).child(
+                            div()
+                                .text_base()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(tr!("repo.claude.open_title")),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child(tr!("repo.claude.open_body")),
+                    ),
+            )
+            .child(
+                crate::ui::button("nochanges-claude")
+                    .outline()
+                    .icon(logo())
+                    .label(tr!("repo.claude.open_title"))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_claude_agent(window, cx)),
+                    ),
+            );
+
         Some(
             v_flex()
                 .id("no-local-changes")
@@ -314,7 +360,8 @@ impl Workspace {
                                 ),
                         )
                         .children(card)
-                        .child(list),
+                        .child(list)
+                        .child(claude),
                 )
                 .into_any_element(),
         )

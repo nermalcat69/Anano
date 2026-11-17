@@ -6,6 +6,7 @@ pub mod branch;
 pub mod clone;
 pub mod diff;
 pub mod error;
+pub mod images;
 pub mod lfs;
 pub mod model;
 pub mod remote;
@@ -24,6 +25,7 @@ pub use diff::{
     diff_file_worktree, parse_patch,
 };
 pub use error::GitError;
+pub use images::{ImagePair, image_pair_worktree, image_pairs_commit, is_image};
 pub use lfs::{LfsOp, LfsSync, is_lfs_enabled, is_lfs_installed, is_lfs_pointer};
 pub use model::{Branch, ChangeKind, CommitInfo, FileStatus, RepoEntry};
 pub use remote::{fetch, pull, push};

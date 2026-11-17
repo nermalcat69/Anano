@@ -966,7 +966,7 @@ fn cached_image(key: &str, url: &str) -> Option<PathBuf> {
 }
 
 /// Where downloaded things that can always be fetched again live.
-fn cache_dir() -> Option<PathBuf> {
+pub(crate) fn cache_dir() -> Option<PathBuf> {
     Some(directories::BaseDirs::new()?.cache_dir().join("Anano"))
 }
 

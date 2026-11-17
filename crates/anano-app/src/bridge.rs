@@ -388,6 +388,29 @@ pub fn diff(
     })
 }
 
+/// The before/after pictures of the selected change, if it is an image (or a commit that
+/// changed some).
+pub fn images(
+    cx: &App,
+    repo: PathBuf,
+    selected: crate::state::workspace::Selected,
+) -> Task<anyhow::Result<Vec<anano_core::git::ImagePair>>> {
+    use crate::state::workspace::Selected;
+    Tokio::spawn_result(cx, async move {
+        Ok(tokio::task::spawn_blocking(move || match selected {
+            Selected::File { path } => anano_core::git::image_pair_worktree(&repo, &path)
+                .ok()
+                .flatten()
+                .into_iter()
+                .collect(),
+            Selected::Commit(id) => {
+                anano_core::git::image_pairs_commit(&repo, &id).unwrap_or_default()
+            }
+        })
+        .await?)
+    })
+}
+
 /// The cheap facts about a repository that ride along with every branch refresh.
 #[derive(Default)]
 pub struct RepoFacts {

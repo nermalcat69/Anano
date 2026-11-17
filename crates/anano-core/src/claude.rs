@@ -115,6 +115,49 @@ pub fn parse_event(line: &str) -> Vec<ClaudeLine> {
     }
 }
 
+/// A new branch in its own working copy (`git worktree`), so an agent can change files,
+/// commit and push without touching the checkout the user is looking at, and several agents
+/// can work on the same repository at once. Returns the new folder.
+pub fn create_worktree(repo: &Path, branch: &str) -> Result<PathBuf, String> {
+    let name = repo.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let dir = crate::external::cache_dir()
+        .ok_or("no cache folder")?
+        .join("agents")
+        .join(format!("{name}-{}", branch.replace('/', "-")));
+    std::fs::create_dir_all(dir.parent().ok_or("bad path")?).map_err(|e| e.to_string())?;
+    let out = Command::new("git")
+        .current_dir(repo)
+        .args(["worktree", "add", "-b", branch])
+        .arg(&dir)
+        .arg("HEAD")
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(dir)
+    } else {
+        Err(shorten(&String::from_utf8_lossy(&out.stderr), 300))
+    }
+}
+
+/// What every agent started from Anano is told about where it is and what to deliver.
+pub fn agent_system_prompt(repo_slug: Option<&str>, branch: &str) -> String {
+    let repo = repo_slug.unwrap_or("this repository");
+    format!(
+        "You were started from Anano, a native Git client for the desktop (Rust + GPUI): it \
+         shows changes, history, branches, pull requests, GitHub Actions runs and connected \
+         GitHub accounts, and starts agents like you on a repository.\n\
+         You work on {repo} in an isolated git worktree (your current directory) on the new \
+         branch `{branch}`, created from the repository's HEAD. Stay inside this directory: \
+         never touch the user's main checkout or other folders.\n\
+         Do what the user asks, then: commit with clear messages, `git push -u origin \
+         {branch}`, and open a pull request with `gh pr create` (a short title and a body \
+         saying what changed and why). If the task splits into independent parts, you may \
+         use subagents; give each part its own branch and worktree (`git worktree add`) so \
+         they never edit the same files, and open one pull request per part. Never force \
+         push and never merge. Finish by listing every pull request URL you opened."
+    )
+}
+
 /// A running Claude Code. Dropping it does not stop it; call [`Self::stop`].
 pub struct ClaudeHandle {
     child: Arc<Mutex<Child>>,
@@ -145,6 +188,7 @@ impl ClaudeHandle {
 pub fn spawn(
     dir: &Path,
     prompt: &str,
+    system: Option<&str>,
     on_line: impl Fn(ClaudeLine) + Send + 'static,
 ) -> Result<ClaudeHandle, String> {
     let claude = find_claude().ok_or("Claude Code (the `claude` command) isn't installed")?;
@@ -162,6 +206,11 @@ pub fn spawn(
             "acceptEdits",
         ])
         .args(["--allowedTools", "Bash(git:*) Bash(gh:*)"])
+        .args(
+            system
+                .into_iter()
+                .flat_map(|s| ["--append-system-prompt", s]),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -214,6 +263,44 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An agent's branch gets its own folder, and the checkout it came from is untouched.
+    #[test]
+    fn a_worktree_is_a_new_branch_in_its_own_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        git(&["init", "-q", "-b", "main"], dir.path());
+        git(&["config", "user.email", "t@t"], dir.path());
+        git(&["config", "user.name", "t"], dir.path());
+        std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+        git(&["add", "."], dir.path());
+        git(&["commit", "-qm", "init"], dir.path());
+        let branch = format!("claude/test-{}", std::process::id());
+        let work = create_worktree(dir.path(), &branch).unwrap();
+        assert!(work.join("a.txt").is_file());
+        assert_eq!(git(&["branch", "--show-current"], &work).trim(), branch);
+        assert_eq!(
+            git(&["branch", "--show-current"], dir.path()).trim(),
+            "main"
+        );
+        // Same branch twice fails with a readable reason instead of clobbering.
+        assert!(create_worktree(dir.path(), &branch).is_err());
+        let prompt = agent_system_prompt(Some("me/repo"), &branch);
+        assert!(
+            prompt.contains("Anano")
+                && prompt.contains("me/repo")
+                && prompt.contains("gh pr create")
+        );
+        let _ = std::fs::remove_dir_all(&work);
+    }
 
     #[test]
     fn stream_events_become_steps() {
@@ -286,7 +373,7 @@ mod tests {
         unsafe { std::env::set_var("ANANO_CLAUDE", &script) };
 
         let (tx, rx) = mpsc::channel();
-        spawn(dir.path(), "quick", move |line| {
+        spawn(dir.path(), "quick", None, move |line| {
             let _ = tx.send(line);
         })
         .unwrap();
@@ -296,7 +383,7 @@ mod tests {
         assert!(matches!(steps[2], ClaudeLine::Done { ok: true, .. }));
 
         let (tx, rx) = mpsc::channel();
-        let handle = spawn(dir.path(), "slow", move |line| {
+        let handle = spawn(dir.path(), "slow", None, move |line| {
             let _ = tx.send(line);
         })
         .unwrap();
