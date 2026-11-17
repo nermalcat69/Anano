@@ -653,6 +653,10 @@ impl Workspace {
                 || e.contains("http status code: 401")
                 || e.contains("rejected the credentials")
         });
+        // Both the branch and its upstream have new commits: offer to combine them.
+        let diverged = error
+            .as_deref()
+            .is_some_and(|e| e.contains("diverged from its upstream"));
         let slug = repo
             .origin
             .as_deref()
@@ -666,7 +670,9 @@ impl Workspace {
         let theme = cx.theme();
         let (danger, warning, border) = (theme.danger, theme.warning, theme.border);
         let error = error.map(|e| {
-            if denied {
+            if diverged {
+                tr!("repo.sync.diverged").to_string()
+            } else if denied {
                 if logins.is_empty() {
                     tr!("repo.sync.denied_none", repo = slug.clone()).to_string()
                 } else {
@@ -697,6 +703,28 @@ impl Workspace {
                                 .text_color(danger)
                                 .child(crate::ui::selectable("notice-error", error)),
                         )
+                        .children(diverged.then(|| {
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    crate::ui::button("notice-merge")
+                                        .primary()
+                                        .xsmall()
+                                        .label(tr!("repo.sync.merge_upstream"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.integrate_upstream(false, cx)
+                                        })),
+                                )
+                                .child(
+                                    crate::ui::button("notice-rebase")
+                                        .outline()
+                                        .xsmall()
+                                        .label(tr!("repo.sync.rebase_upstream"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.integrate_upstream(true, cx)
+                                        })),
+                                )
+                        }))
                         .children(logins.into_iter().enumerate().map(|(ix, login)| {
                             let name = login.clone();
                             crate::ui::button(("notice-use-account", ix))
@@ -1192,6 +1220,7 @@ mod tests {
             ws.accounts = vec![anano_core::external::Account {
                 login: "a-fairly-long-login".into(),
                 active: true,
+                plaintext: false,
             }];
             ws.open_repo_path(repo, cx);
         });

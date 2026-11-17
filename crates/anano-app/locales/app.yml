@@ -548,6 +548,8 @@ settings:
     en: No GitHub account connected yet
   accounts_no_gh:
     en: Install the GitHub CLI (gh) to connect GitHub accounts
+  accounts_plaintext:
+    en: "Token stored in a plain file. Move it to the system keyring: gh auth login --secure-storage"
   accounts_default:
     en: default in terminal
   accounts_add:
@@ -806,6 +808,12 @@ repo:
       en: Push
     error:
       en: "Sync failed: %{error}"
+    diverged:
+      en: "Your branch and its upstream each have new commits. Merge brings theirs in; Rebase puts yours on top. Your changes are safe."
+    merge_upstream:
+      en: Merge
+    rebase_upstream:
+      en: Rebase
     denied:
       en: "The selected account can't access %{repo}. Your changes are safe. Try another connected account:"
     denied_none:

@@ -28,7 +28,7 @@ pub use error::GitError;
 pub use images::{ImagePair, image_pair_worktree, image_pairs_commit, is_image};
 pub use lfs::{LfsOp, LfsSync, is_lfs_enabled, is_lfs_installed, is_lfs_pointer};
 pub use model::{Branch, ChangeKind, CommitInfo, FileStatus, RepoEntry};
-pub use remote::{fetch, pull, push};
+pub use remote::{fetch, integrate_upstream, pull, push};
 pub use repo::{
     commit_paths, commit_staged, discard_change, discover_root, ignore_extension, ignore_path,
     recent_commits, repo_status, stage_all, stage_path, unstage_path,

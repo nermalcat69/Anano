@@ -1390,9 +1390,47 @@ impl Workspace {
         self.run_sync(SyncKind::Push, cx);
     }
 
+    /// The branch and its upstream have each moved on: merge (or rebase onto) the upstream.
+    /// Conflicts, if any, are left for the Changes list.
+    pub fn integrate_upstream(&mut self, rebase: bool, cx: &mut Context<Self>) {
+        let Some(repo) = self.active_repo() else {
+            return;
+        };
+        if repo.syncing.is_some() {
+            return;
+        }
+        let (path, id) = (repo.entry.path.clone(), repo.entry.id);
+        if let Some(repo) = self.repos.iter_mut().find(|r| r.entry.id == id) {
+            repo.syncing = Some(SyncKind::Pull);
+            repo.action_error = None;
+        }
+        let task = bridge::integrate_upstream(cx, path, rebase);
+        cx.notify();
+        cx.spawn(async move |ws, cx| {
+            let result = task.await;
+            let _ = ws.update(cx, |ws, cx| {
+                if let Some(repo) = ws.repos.iter_mut().find(|r| r.entry.id == id) {
+                    repo.syncing = None;
+                    repo.action_error = action_error(result);
+                }
+                ws.refresh_active_status(cx);
+                ws.refresh_active_log(cx);
+                ws.refresh_active_branches(cx);
+            });
+        })
+        .detach();
+    }
+
     fn run_sync(&mut self, kind: SyncKind, cx: &mut Context<Self>) {
         let Some(repo) = self.active_repo() else {
             return;
+        };
+        // Prevention: pushing a branch the remote has moved past is refused by the server
+        // anyway, and is how a branch ends up diverged. Bring the remote's commits in first
+        // (a fast-forward when possible; otherwise the Merge / Rebase choice appears).
+        let kind = match (kind, repo.current_branch().and_then(|b| b.ahead_behind)) {
+            (SyncKind::Push, Some((_, behind))) if behind > 0 => SyncKind::Pull,
+            _ => kind,
         };
         if repo.syncing.is_some() {
             return; // 上一次还没跑完，别叠加一次

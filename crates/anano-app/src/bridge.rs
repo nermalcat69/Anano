@@ -172,6 +172,20 @@ pub fn pull_remote(cx: &App, repo: PathBuf) -> Task<anyhow::Result<Result<(), Gi
     })
 }
 
+/// Merge or rebase the upstream's new commits into the current branch.
+pub fn integrate_upstream(
+    cx: &App,
+    repo: PathBuf,
+    rebase: bool,
+) -> Task<anyhow::Result<Result<(), GitError>>> {
+    Tokio::spawn_result(cx, async move {
+        Ok(
+            tokio::task::spawn_blocking(move || anano_core::git::integrate_upstream(&repo, rebase))
+                .await?,
+        )
+    })
+}
+
 /// `git push`，推当前分支到同名远程分支。
 pub fn push_remote(
     cx: &App,

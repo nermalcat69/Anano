@@ -63,6 +63,9 @@ pub struct Account {
     pub login: String,
     /// The account plain `gh` / `git` commands use by default.
     pub active: bool,
+    /// `gh` keeps this account's token in a plain file (`hosts.yml`) instead of the system
+    /// keyring (Keychain / Credential Manager / Secret Service).
+    pub plaintext: bool,
 }
 
 /// GitHub accounts `gh` is signed into. Empty when `gh` is missing or signed out.
@@ -87,6 +90,8 @@ fn parse_accounts(json: &[u8]) -> Vec<Account> {
             Some(Account {
                 login: a["login"].as_str()?.to_string(),
                 active: a["active"].as_bool().unwrap_or(false),
+                // "keyring", or an environment variable's name: only this one is a file.
+                plaintext: a["tokenSource"].as_str() == Some("oauth_token"),
             })
         })
         .collect()
@@ -1238,15 +1243,28 @@ mod tests {
             vec![
                 Account {
                     login: "one".into(),
-                    active: true
+                    active: true,
+                    plaintext: false,
                 },
                 Account {
                     login: "two".into(),
-                    active: false
+                    active: false,
+                    plaintext: false,
                 },
             ]
         );
         assert!(parse_accounts(b"not json").is_empty());
+        // Where gh keeps the token: the keyring is fine; a plain file is flagged.
+        let storage = |source: &str| {
+            parse_accounts(
+                format!(
+                    r#"{{"hosts":{{"github.com":[{{"state":"success","active":true,"login":"x","tokenSource":"{source}"}}]}}}}"#
+                )
+                .as_bytes(),
+            )[0]
+            .plaintext
+        };
+        assert!(!storage("keyring") && !storage("GH_TOKEN") && storage("oauth_token"));
     }
 
     #[test]
@@ -1255,10 +1273,12 @@ mod tests {
             Account {
                 login: "arjunowo".into(),
                 active: true,
+                plaintext: false,
             },
             Account {
                 login: "nermalcat69".into(),
                 active: false,
+                plaintext: false,
             },
         ];
         let first = |url: &str| accounts_for(url, &accounts)[0].login.clone();
