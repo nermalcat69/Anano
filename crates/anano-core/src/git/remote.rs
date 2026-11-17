@@ -123,6 +123,44 @@ pub fn fetch(repo_path: &Path, remote_name: &str) -> Result<(), GitError> {
     Ok(())
 }
 
+/// Bring the commits the upstream has into the current branch when both sides have new
+/// ones (what `pull` refuses to do for you): merge them in, or put your commits on top of
+/// them (`rebase`). Local only: the upstream was fetched already. If it stops on conflicts
+/// the repository is left mid-merge / mid-rebase with the conflicted files marked, which is
+/// how the Changes list shows them; the error says so.
+pub fn integrate_upstream(repo_path: &Path, rebase: bool) -> Result<(), GitError> {
+    let args: &[&str] = if rebase {
+        &["rebase", "@{u}"]
+    } else {
+        &["merge", "--no-edit", "@{u}"]
+    };
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo_path)
+        .env("GIT_EDITOR", "true")
+        .output()
+        .map_err(|e| GitError::Remote(git2::Error::from_str(&e.to_string())))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let message = if text.contains("CONFLICT") {
+        "The merge stopped on conflicts. Resolve them in the Changes list (Claude Code can do it)."
+            .to_string()
+    } else {
+        text.trim()
+            .lines()
+            .last()
+            .unwrap_or("git failed")
+            .to_string()
+    };
+    Err(GitError::Remote(git2::Error::from_str(&message)))
+}
+
 /// `git pull` 的快进子集：先 fetch，再检查当前分支相对上游能不能快进。
 /// 分叉了（双方各有新提交）就报 [`GitError::Diverged`]，不自动造合并提交——
 /// 那是需要用户决定怎么处理冲突的事，不是这一版要做的。
@@ -413,5 +451,79 @@ mod tests {
             pull(local_dir.path(), "origin"),
             Err(GitError::Diverged)
         ));
+    }
+
+    /// Both sides have a commit: merge brings them together; a clash reports conflicts and
+    /// leaves the repository mid-merge for the Changes list.
+    #[test]
+    fn integrating_a_diverged_upstream_merges_or_reports_conflicts() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            let ok = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(
+                ok.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&ok.stderr)
+            );
+        };
+        let commit = |dir: &Path, file: &str, text: &str| {
+            fs::write(dir.join(file), text).unwrap();
+            git(&["add", "."], dir);
+            git(
+                &[
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "commit",
+                    "-qm",
+                    file,
+                ],
+                dir,
+            );
+        };
+        let bare = root.path().join("bare.git");
+        git(
+            &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()],
+            root.path(),
+        );
+        let (a, b) = (root.path().join("a"), root.path().join("b"));
+        git(
+            &["clone", "-q", bare.to_str().unwrap(), a.to_str().unwrap()],
+            root.path(),
+        );
+        commit(&a, "base.txt", "base\n");
+        git(&["push", "-q", "origin", "HEAD:main"], &a);
+        git(
+            &["clone", "-q", bare.to_str().unwrap(), b.to_str().unwrap()],
+            root.path(),
+        );
+        // Distinct files on each side: merges cleanly.
+        commit(&a, "from-a.txt", "a\n");
+        git(&["push", "-q", "origin", "HEAD:main"], &a);
+        commit(&b, "from-b.txt", "b\n");
+        git(&["fetch", "-q"], &b);
+        assert!(matches!(pull(&b, "origin"), Err(GitError::Diverged)));
+        integrate_upstream(&b, false).unwrap();
+        assert!(b.join("from-a.txt").is_file() && b.join("from-b.txt").is_file());
+        // Same file edited on both sides: conflicts, reported and left in place.
+        commit(&a, "same.txt", "one\n");
+        git(&["push", "-q", "origin", "HEAD:main"], &a);
+        git(&["pull", "-q", "--no-rebase", "--no-edit"], &b);
+        commit(&a, "same.txt", "from a\n");
+        git(&["push", "-q", "origin", "HEAD:main"], &a);
+        commit(&b, "same.txt", "from b\n");
+        git(&["fetch", "-q"], &b);
+        let err = integrate_upstream(&b, false).unwrap_err().to_string();
+        assert!(err.contains("conflicts"), "{err}");
+        assert!(
+            fs::read_to_string(b.join("same.txt"))
+                .unwrap()
+                .contains("<<<<<<<")
+        );
     }
 }

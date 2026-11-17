@@ -267,6 +267,16 @@ fn accounts_page(workspace: WeakEntity<Workspace>) -> SettingPage {
                                 .items_center()
                                 .child(Icon::new(IconName::Github).size_4())
                                 .child(div().font_weight(FontWeight::MEDIUM).child(account.login))
+                                .when(account.plaintext, |row| {
+                                    row.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(
+                                                gpui_kit::component::ActiveTheme::theme(cx).warning,
+                                            )
+                                            .child(tr!("settings.accounts_plaintext")),
+                                    )
+                                })
                                 .when(account.active, |row| {
                                     row.child(
                                         div()
