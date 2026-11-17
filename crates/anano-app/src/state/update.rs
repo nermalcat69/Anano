@@ -34,10 +34,10 @@ use gpui_updater::{
 use crate::i18n::tr;
 use crate::state::settings;
 
-pub const REPO_OWNER: &str = "finch-xu";
+pub const REPO_OWNER: &str = "nermalcat69";
 pub const REPO_NAME: &str = "Anano";
 /// 发布页：自动更新不可用（开发构建、未支持的平台、安装失败）时给用户的退路。
-pub const RELEASES_URL: &str = "https://github.com/finch-xu/Anano/releases";
+pub const RELEASES_URL: &str = "https://github.com/nermalcat69/Anano/releases";
 /// 中国大陆镜像的静态 manifest（阿里云 OSS，release.yml 的 mirror-to-oss job 生成并上传）。
 /// 桶里是扁平覆盖布局：产物直接躺在 `Anano/` 下，每次发版原地覆盖，只保留最新版。
 pub const MIRROR_MANIFEST_URL: &str = "https://d.mirror.catonthe.top/Anano/latest.json";

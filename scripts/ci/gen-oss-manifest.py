@@ -108,7 +108,7 @@ def main() -> int:
         "schema_version": 1,
         "app_id": "top.catonthe.anano",
         "version": args.tag,
-        "notes_url": f"https://github.com/finch-xu/Anano/releases/tag/{args.tag}",
+        "notes_url": f"https://github.com/nermalcat69/Anano/releases/tag/{args.tag}",
         "assets": entries,
     }
     args.out.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")

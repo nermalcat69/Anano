@@ -33,9 +33,21 @@ GPU rendering · Low resource usage · All data stays local · No Electron, No T
 - [git-lfs](https://git-lfs.com) only for repositories that use LFS.
 - The Nermal IDE only for the "Open in Nermal" button.
 
-## Run
+## Install
 
-Rust 1.97 or newer.
+Download the build for your OS and CPU from [Releases](https://github.com/nermalcat69/Anano/releases):
+
+| OS | File |
+|---|---|
+| macOS | `Anano-macos-arm64.dmg` / `Anano-macos-x64.dmg` |
+| Windows | `Anano-windows-<arch>.msi` (installer) or `.exe` (portable) |
+| Linux | `Anano-linux-<arch>.tar.gz` |
+
+Anano checks GitHub Releases for updates a few seconds after launch and installs them in place. Every download is verified against `SHA256SUMS` and a [minisign](https://jedisct1.github.io/minisign/) signature (public key: [`minisign.pub`](minisign.pub)).
+
+## Run from source
+
+Rust 1.97 or newer. On Linux install the Wayland/X11, xkbcommon, fontconfig and Vulkan headers (see the list in [`ci.yml`](.github/workflows/ci.yml)).
 
 ```bash
 cargo run -p anano-app      # run
@@ -56,6 +68,19 @@ Anano works directly on each repository's own `.git`. It only saves the list of 
 | macOS | `~/Library/Application Support/Anano/` |
 | Linux | `~/.local/share/anano/` |
 | Windows | `%APPDATA%\Anano\data\` |
+
+## Releasing
+
+CI (`ci.yml`) builds and tests on macOS, Windows and Linux for every PR. Releases are tag-driven:
+
+```bash
+scripts/release.sh 0.9.0          # bumps Cargo.toml + Cargo.lock, runs the checks
+git commit -am "Release 0.9.0" && git tag v0.9.0 && git push --follow-tags
+```
+
+`release.yml` then builds all six targets, creates `SHA256SUMS` and `.minisig` files, and publishes the release. Tags containing `-` (e.g. `v0.9.0-rc.1`) become prereleases that the updater ignores.
+
+One-time setup in **Settings → Environments → `prod`**: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` (macOS signing and notarization) and `MINISIGN_SECRET_KEY`. The checked-in `minisign.pub` must match that key: generate your own with `minisign -G -W` and replace `minisign.pub` before the first release. The optional Aliyun mirror job runs only if the repository variable `OSS_MIRROR` is `true`.
 
 ## License
 
