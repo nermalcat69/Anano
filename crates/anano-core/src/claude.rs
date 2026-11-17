@@ -35,16 +35,20 @@ pub fn find_claude() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("ANANO_CLAUDE") {
         return Some(PathBuf::from(path));
     }
+    let exe = if cfg!(windows) { "claude.exe" } else { "claude" };
     let on_path = std::env::var_os("PATH")
         .iter()
         .flat_map(std::env::split_paths)
-        .map(|dir| dir.join("claude"))
+        .map(|dir| dir.join(exe))
         .find(|p| p.is_file());
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    // Windows has no HOME; USERPROFILE is the equivalent
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
     on_path.or_else(|| {
         [
-            home.as_ref().map(|h| h.join(".local/bin/claude")),
-            home.as_ref().map(|h| h.join(".claude/local/claude")),
+            home.as_ref().map(|h| h.join(".local/bin").join(exe)),
+            home.as_ref().map(|h| h.join(".claude/local").join(exe)),
             Some(PathBuf::from("/opt/homebrew/bin/claude")),
             Some(PathBuf::from("/usr/local/bin/claude")),
         ]
