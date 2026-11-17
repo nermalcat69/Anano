@@ -55,6 +55,8 @@ pub const ICON_BOOK: &str = "icons/book.svg";
 pub const ICON_REFRESH: &str = "icons/refresh-cw.svg";
 /// Toolbar: the Pull Requests button.
 pub const ICON_PULL_REQUEST: &str = "icons/git-pull-request.svg";
+/// Toolbar: the Workflows button.
+pub const ICON_WORKFLOW: &str = "icons/play-circle.svg";
 
 /// 应用自带的资源表：上游 `gpui-component-assets` 只嵌入了一小份「默认」图标
 /// （见其 `default-icons.txt`），这里用到的 git/同步相关图形大多不在其中，
@@ -65,6 +67,10 @@ const ASSETS: &[(&str, &[u8])] = &[
     (
         LOGO_DARK_PATH,
         include_bytes!("../assets/logo/logo-dark.svg"),
+    ),
+    (
+        ICON_WORKFLOW,
+        include_bytes!("../assets/icons/play-circle.svg"),
     ),
     (
         ICON_PULL_REQUEST,

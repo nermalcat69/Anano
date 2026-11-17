@@ -341,6 +341,7 @@ impl Workspace {
                                         let name = r.name.clone();
                                         h_flex()
                                             .id(("clone-repo", ix))
+                                            .flex_none()
                                             .gap_2p5()
                                             .px_2()
                                             .py_1p5()
@@ -741,6 +742,94 @@ impl Workspace {
         });
     }
 
+    /// "Rename Branch": a name box starting out as the current name.
+    pub fn open_rename_branch_dialog(
+        &mut self,
+        old: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let name = cx.new(|cx| InputState::new(window, cx).default_value(old.clone()));
+        name.update(cx, |input, cx| input.focus(window, cx));
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (name_c, name_f, ws_f, old_f) =
+                (name.clone(), name.clone(), workspace.clone(), old.clone());
+            dialog
+                .title(tr!("repo.branch.rename_title"))
+                .w(px(DIALOG_WIDTH))
+                .content(move |content, _, cx| {
+                    content.child(v_flex().gap_3().py_1().child(field(
+                        tr!("repo.branch.name"),
+                        boxed(&name_c, cx.theme().border),
+                    )))
+                })
+                .footer(footer(
+                    crate::ui::button("rename-branch-confirm")
+                        .label(tr!("repo.branch.rename_action"))
+                        .on_click(move |_, window, cx| {
+                            // Spaces can't be in a branch name.
+                            let new = text_of(&name_f, cx).replace(char::is_whitespace, "-");
+                            if new.is_empty() {
+                                return;
+                            }
+                            window.close_dialog(cx);
+                            let old = old_f.clone();
+                            ws_f.update(cx, |ws, cx| ws.rename_branch(old, new, cx));
+                        }),
+                ))
+        });
+    }
+
+    /// Removing a repository from Anano forgets it (its tab, its place in the list); the
+    /// files are never touched. Asked first, since it is one slip of a click otherwise.
+    pub fn confirm_remove_repo(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let Some((id, name, path)) = self.repo_summary(ix) else {
+            return;
+        };
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (ws_f, name_c, path_c) = (workspace.clone(), name.clone(), path.clone());
+            dialog
+                .title(tr!("repo.remove.title", name = name.clone()))
+                .w(px(DIALOG_WIDTH))
+                .content(move |content, _, cx| {
+                    content.child(
+                        v_flex()
+                            .gap_2()
+                            .py_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .child(tr!("repo.remove.body", name = name_c.clone())),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(path_c.clone()),
+                            ),
+                    )
+                })
+                .footer(footer(
+                    crate::ui::button("remove-repo-confirm")
+                        .danger()
+                        .label(tr!("repo.remove.action"))
+                        .on_click(move |_, window, cx| {
+                            window.close_dialog(cx);
+                            // By id, not position: tabs may have moved while this was open.
+                            ws_f.update(cx, |ws, cx| ws.remove_repo_id(id, window, cx));
+                        }),
+                ))
+        });
+    }
+
     /// "Switch Branch" with uncommitted changes: leave them (stashed) on the branch being
     /// left, or bring them along.
     pub fn open_switch_branch_dialog(
@@ -993,14 +1082,22 @@ mod tests {
                 s.set_selected_index(Some(IndexPath::default().row(1)), window, cx)
             });
         });
-        let readme = cx
-            .debug_bounds("create-readme")
-            .expect("README checkbox is on screen");
-        cx.simulate_click(
-            gpui_kit::point(readme.left() + gpui_kit::px(8.), readme.center().y),
-            gpui_kit::Modifiers::none(),
-        );
-        cx.run_until_parked();
+        // The dialog can re-flow while this runs (the connected accounts load in the
+        // background and add a row), so measure the checkbox again before each try.
+        for _ in 0..5 {
+            if form.readme.get() {
+                break;
+            }
+            cx.run_until_parked();
+            let readme = cx
+                .debug_bounds("create-readme")
+                .expect("README checkbox is on screen");
+            cx.simulate_click(
+                gpui_kit::point(readme.left() + gpui_kit::px(8.), readme.center().y),
+                gpui_kit::Modifiers::none(),
+            );
+            cx.run_until_parked();
+        }
 
         let options = cx
             .update(|_, cx| form.options(Some(&templates), cx))

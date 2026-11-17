@@ -5,7 +5,6 @@ use anano_core::model::{AppSettings, EDITOR_FONT_SIZE_RANGE};
 use gpui_kit::component::Theme;
 use gpui_kit::{App, Global, px};
 
-use crate::i18n;
 use crate::state::store::store;
 use crate::state::update;
 
@@ -45,13 +44,8 @@ pub fn update(cx: &mut App, f: impl FnOnce(&mut AppSettings)) {
         Theme::global_mut(cx).mono_font_size = px(next.editor_font_size as f32);
         cx.refresh_windows();
     }
-    if next.language != before.language {
-        i18n::apply(next.language, cx);
-    }
-    // 语言影响「自动」更新源的解析结果，所以语言变了也要重算；
     // 必须在 set_global 之后调，sync_source 要读到新设置。
-    let source_inputs_changed =
-        next.update_source != before.update_source || next.language != before.language;
+    let source_inputs_changed = next.update_source != before.update_source;
     if let Some(store) = store(cx) {
         store.write_settings(next.clone());
     }
@@ -69,5 +63,4 @@ pub fn reset(cx: &mut App) {
 /// 把一份设置整体套到运行时（启动与恢复默认时用）。
 fn apply(settings: &AppSettings, cx: &mut App) {
     Theme::global_mut(cx).mono_font_size = px(settings.editor_font_size as f32);
-    i18n::apply(settings.language, cx);
 }

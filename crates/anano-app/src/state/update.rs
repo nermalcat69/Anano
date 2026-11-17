@@ -82,18 +82,11 @@ pub enum ResolvedSource {
     ChinaMirror,
 }
 
-/// 把更新源偏好解析成真实源：自动模式看界面语言（中文 → 大陆镜像），显式选择直接生效。
-pub fn resolve_source(pref: UpdateSourcePref, ui_locale: &str) -> ResolvedSource {
+/// 把更新源偏好解析成真实源：自动与全球走 GitHub，显式选了镜像才走大陆镜像。
+pub fn resolve_source(pref: UpdateSourcePref) -> ResolvedSource {
     match pref {
-        UpdateSourcePref::Global => ResolvedSource::Global,
+        UpdateSourcePref::Auto | UpdateSourcePref::Global => ResolvedSource::Global,
         UpdateSourcePref::ChinaMirror => ResolvedSource::ChinaMirror,
-        UpdateSourcePref::Auto => {
-            if ui_locale == crate::i18n::ZH_CN {
-                ResolvedSource::ChinaMirror
-            } else {
-                ResolvedSource::Global
-            }
-        }
     }
 }
 
@@ -119,8 +112,8 @@ impl<G: UpdateSource, M: UpdateSource> UpdateSource for SwitchableSource<G, M> {
     }
 }
 
-/// 按当前设置与界面语言重算更新源。`settings::update` 在 `update_source` 或 `language`
-/// （影响自动模式）变化后调用；下一次检查即走新源。
+/// 按当前设置重算更新源。`settings::update` 在 `update_source` 变化后调用；
+/// 下一次检查即走新源。
 pub fn sync_source(cx: &mut App) {
     let Some(switch) = cx
         .try_global::<UpdaterHandle>()
@@ -128,10 +121,7 @@ pub fn sync_source(cx: &mut App) {
     else {
         return;
     };
-    let resolved = resolve_source(
-        settings::settings(cx).update_source,
-        crate::i18n::current(cx),
-    );
+    let resolved = resolve_source(settings::settings(cx).update_source);
     *switch
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = resolved;
@@ -277,10 +267,7 @@ pub fn install(cx: &mut App) {
     // 按 OS 猜的扩展名，理由同上用 asset_patterns 整体替换。
     let mirror =
         StaticManifestSource::new(MIRROR_MANIFEST_URL).asset_patterns(vec![pattern.to_string()]);
-    let resolved = resolve_source(
-        settings::settings(cx).update_source,
-        crate::i18n::current(cx),
-    );
+    let resolved = resolve_source(settings::settings(cx).update_source);
     let switch = Arc::new(Mutex::new(resolved));
     let source = SwitchableSource {
         current: switch.clone(),
@@ -544,32 +531,14 @@ mod tests {
         }
     }
 
-    /// 自动模式跟着界面语言走：中文界面用大陆镜像，其余用 GitHub；显式选择无视语言。
+    /// 自动与全球都走 GitHub；只有显式选了镜像才走大陆镜像。
     #[test]
-    fn auto_source_follows_ui_language_and_explicit_choice_wins() {
+    fn only_an_explicit_choice_uses_the_mirror() {
         use anano_core::model::UpdateSourcePref::{Auto, ChinaMirror, Global};
 
-        assert_eq!(
-            resolve_source(Auto, crate::i18n::ZH_CN),
-            ResolvedSource::ChinaMirror
-        );
-        assert_eq!(
-            resolve_source(Auto, crate::i18n::EN),
-            ResolvedSource::Global
-        );
-        // 只有中文界面走大陆镜像：日文与其它语言一律 GitHub
-        assert_eq!(
-            resolve_source(Auto, crate::i18n::JA),
-            ResolvedSource::Global
-        );
-        assert_eq!(
-            resolve_source(Global, crate::i18n::ZH_CN),
-            ResolvedSource::Global
-        );
-        assert_eq!(
-            resolve_source(ChinaMirror, crate::i18n::EN),
-            ResolvedSource::ChinaMirror
-        );
+        assert_eq!(resolve_source(Auto), ResolvedSource::Global);
+        assert_eq!(resolve_source(Global), ResolvedSource::Global);
+        assert_eq!(resolve_source(ChinaMirror), ResolvedSource::ChinaMirror);
     }
 
     /// 切换共享状态后，同一个源实例的下一次 fetch 就走另一边——不需要重建 Updater 实体。

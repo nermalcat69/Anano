@@ -83,6 +83,26 @@ pub fn unstage_path(repo_path: &Path, file: &str) -> Result<(), GitError> {
     Ok(())
 }
 
+/// Commit exactly the ticked files: everything in `include` goes into the commit as it is
+/// on disk, everything in `exclude` is left out (and left alone in the working tree).
+///
+/// That is the whole "checkbox" model: the index is rebuilt from the ticks right before
+/// committing, so what was staged beforehand, in this app or in a terminal, doesn't leak in.
+pub fn commit_paths(
+    repo_path: &Path,
+    message: &str,
+    include: &[String],
+    exclude: &[String],
+) -> Result<String, GitError> {
+    for file in exclude {
+        unstage_path(repo_path, file)?;
+    }
+    for file in include {
+        stage_path(repo_path, file)?;
+    }
+    commit_staged(repo_path, message)
+}
+
 /// 把当前索引（已 stage 的内容）提交为一个新 commit；`HEAD` 是首个提交时没有父提交。
 /// 签名优先用仓库 / 全局 git config 里的 `user.name` / `user.email`，没配过就退回一个
 /// 占位身份——本地提交允许这样，往后阶段有远程推送时再逼用户配置。
@@ -363,5 +383,62 @@ mod tests {
         ignore_extension(dir.path(), "notes/todo.log").unwrap();
         let content = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         assert!(content.lines().any(|l| l == "*.log"));
+    }
+
+    #[test]
+    fn commit_paths_commits_the_ticked_files_and_leaves_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(p)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "a@b.c"]);
+        git(&["config", "user.name", "test"]);
+        for name in ["keep.txt", "skip.txt", "gone.txt"] {
+            std::fs::write(p.join(name), "one\n").unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+
+        std::fs::write(p.join("keep.txt"), "two\n").unwrap();
+        std::fs::write(p.join("skip.txt"), "two\n").unwrap();
+        std::fs::remove_file(p.join("gone.txt")).unwrap();
+        std::fs::write(p.join("new.txt"), "fresh\n").unwrap();
+        // Staged behind our back, but unticked: must not end up in the commit.
+        git(&["add", "skip.txt"]);
+
+        let include = ["keep.txt", "gone.txt", "new.txt"].map(String::from);
+        commit_paths(p, "picked", &include, &["skip.txt".to_string()]).unwrap();
+
+        let left: Vec<String> = repo_status(p)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.path)
+            .collect();
+        assert_eq!(
+            left,
+            ["skip.txt"],
+            "only the unticked file should still be changed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(p.join("skip.txt")).unwrap(),
+            "two\n"
+        );
+        let show = std::process::Command::new("git")
+            .args(["show", "--name-status", "--format=", "HEAD"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        let mut changed: Vec<&str> = std::str::from_utf8(&show.stdout).unwrap().lines().collect();
+        changed.sort();
+        assert_eq!(changed, ["A\tnew.txt", "D\tgone.txt", "M\tkeep.txt"]);
     }
 }

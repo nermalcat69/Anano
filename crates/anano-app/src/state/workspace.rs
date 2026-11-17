@@ -20,7 +20,7 @@ use gpui_kit::component::{
     alert::Alert,
     button::ButtonVariants,
     h_flex,
-    input::InputState,
+    input::{InputState, TextareaState},
     resizable::{ResizableState, h_resizable, resizable_panel},
     status_bar::StatusBar,
     v_flex,
@@ -39,11 +39,13 @@ use crate::brand::APP_NAME;
 use crate::bridge;
 use crate::i18n::tr;
 use crate::state::repos::{OpenRepo, SyncKind};
-use crate::state::settings;
 use crate::state::store::{banner, store};
 use crate::state::update;
 use crate::ui::settings_dialog::{SettingsPage, open_settings, open_settings_page};
-use crate::{CloseTab, OpenRepoAction, OpenSettings, ToggleSidebar};
+use crate::{
+    CloseTab, OpenRepoAction, OpenRepositoryOnGitHub, OpenSettings, RevealRepository, SyncNow,
+    ToggleSidebar,
+};
 
 /// 侧栏默认宽度。比 HTTP 版本的窄栏宽一些：仓库路径普遍比请求标题长，
 /// 底部还常驻着提交信息输入框，太窄会把两者都挤成省略号。
@@ -76,13 +78,28 @@ pub enum LoginState {
 /// What the main pane is showing the diff of.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selected {
-    /// A row of the Changes tab: the staged (HEAD→index) or unstaged (index→worktree) side.
-    File { path: String, staged: bool },
+    /// A row of the Changes tab: everything changed in that file since HEAD.
+    File { path: String },
     /// A row of the History tab, by full commit id.
     Commit(String),
 }
 
 pub struct Workspace {
+    /// The account view (repositories, organizations, commit history of an account's
+    /// repositories), when it is what the main pane shows.
+    pub(crate) account: Option<crate::ui::account_view::AccountState>,
+    pub(crate) account_search_input: Entity<InputState>,
+    pub(crate) commit_scroll: UniformListScrollHandle,
+    /// The Workflows view (GitHub Actions), when it is what the main pane shows.
+    pub(crate) workflows: Option<crate::ui::workflows::WorkflowsState>,
+    pub(crate) log_scroll: UniformListScrollHandle,
+    /// The filter box inside the workflow picker.
+    pub(crate) workflow_search_input: Entity<InputState>,
+    /// The message of the review being written, and the diff's scroll position.
+    pub(crate) review_input: Entity<TextareaState>,
+    pub(crate) review_scroll: UniformListScrollHandle,
+    /// The Pull Requests view's search box (`author:` words and free text).
+    pub(crate) pr_search_input: Entity<InputState>,
     /// The Pull Requests view, when it is what the main pane shows.
     pub(crate) pulls: Option<crate::ui::pull_requests::PullRequests>,
     /// Commit-author profile pictures by email. `None` = asked for, not (or never) found;
@@ -131,10 +148,10 @@ pub struct Workspace {
     update_status: UpdateStatus,
     /// 侧栏底部常驻的提交信息输入框；一个窗口一份，跟着 `active` 指向哪个仓库走。
     pub(crate) commit_input: Entity<InputState>,
-    /// 「新建分支」的内联输入框；点「New Branch…」才展开，跟提交框一样常驻一份、
-    /// 复用同一个 `InputState`（不是每次展开都新建，输入法组合状态不会被打断）。
-    pub(crate) new_branch_input: Entity<InputState>,
-    pub(crate) new_branch_open: bool,
+    /// The optional longer description under the summary (the commit message body).
+    pub(crate) commit_description: Entity<TextareaState>,
+    /// Profile pictures of the connected accounts, by login.
+    pub(crate) account_avatars: HashMap<String, Option<PathBuf>>,
     /// 侧栏下半部分当前显示哪个标签（改动 / 历史）。
     pub(crate) sidebar_tab: SidebarTab,
     /// 仓库切换器里的过滤输入框。
@@ -158,8 +175,33 @@ impl Workspace {
             repos,
             errors: _,
         } = loaded;
+        // Whether a layout was ever saved: only then does "not in the tab order" mean the
+        // tab was closed (rather than "nothing recorded yet, give everything a tab").
+        let had_layout = state.is_some();
         let state = state.unwrap_or_default();
+        let pr_search_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(tr!("repo.pulls.search_placeholder"))
+        });
+        let review_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(3, 6)
+                .placeholder(tr!("repo.pulls.review_placeholder"))
+        });
+        let workflow_search_input = cx
+            .new(|cx| InputState::new(window, cx).placeholder(tr!("repo.workflows.picker_search")));
+        let account_search_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(tr!("repo.account.filter_placeholder"))
+        });
         let mut ws = Self {
+            account: None,
+            account_search_input: account_search_input.clone(),
+            commit_scroll: UniformListScrollHandle::new(),
+            workflows: None,
+            log_scroll: UniformListScrollHandle::new(),
+            workflow_search_input: workflow_search_input.clone(),
+            review_input: review_input.clone(),
+            review_scroll: UniformListScrollHandle::new(),
+            pr_search_input: pr_search_input.clone(),
             pulls: None,
             avatars: HashMap::new(),
             branch_popover_open: false,
@@ -192,10 +234,12 @@ impl Workspace {
             update_status: update::status(cx),
             commit_input: cx
                 .new(|cx| InputState::new(window, cx).placeholder(tr!("repo.commit.placeholder"))),
-            new_branch_input: cx.new(|cx| {
-                InputState::new(window, cx).placeholder(tr!("repo.branch.new_placeholder"))
+            commit_description: cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .auto_grow(3, 8)
+                    .placeholder(tr!("repo.commit.description"))
             }),
-            new_branch_open: false,
+            account_avatars: HashMap::new(),
             sidebar_tab: SidebarTab::default(),
             repo_search_input: cx.new(|cx| {
                 InputState::new(window, cx).placeholder(tr!("repo.switcher.search_placeholder"))
@@ -214,8 +258,8 @@ impl Workspace {
         // 字段，Phase 1 没必要为同一件事再加一套字段）。
         ws.reorder_repos(&state.tab_order);
         // Repositories not in the saved tab order had their tab closed; they are still in
-        // the app. (An empty order means "no saved layout": everything gets a tab.)
-        if !state.tab_order.is_empty() {
+        // the app. That holds even when every tab was closed (an empty order).
+        if had_layout {
             for repo in &mut ws.repos {
                 repo.in_tabs = state.tab_order.contains(&repo.entry.id);
             }
@@ -237,7 +281,38 @@ impl Workspace {
                 }
             }));
 
+        ws._subs.push(cx.subscribe_in(
+            &workflow_search_input,
+            window,
+            |this, _, event: &gpui_kit::component::input::InputEvent, _, cx| {
+                this.on_workflow_search_event(event, cx)
+            },
+        ));
+        ws._subs.push(cx.subscribe_in(
+            &account_search_input,
+            window,
+            |_, _, event: &gpui_kit::component::input::InputEvent, _, cx| {
+                if matches!(event, gpui_kit::component::input::InputEvent::Change) {
+                    cx.notify();
+                }
+            },
+        ));
+        ws._subs.push(cx.subscribe_in(
+            &review_input,
+            window,
+            |this, _, event: &gpui_kit::component::input::InputEvent, _, cx| {
+                this.on_review_input_event(event, cx)
+            },
+        ));
+        ws._subs.push(cx.subscribe_in(
+            &pr_search_input,
+            window,
+            |this, _, event: &gpui_kit::component::input::InputEvent, _, cx| {
+                this.on_pr_search_event(event, cx)
+            },
+        ));
         ws.refresh_accounts(cx);
+        ws.learn_owners(cx);
         // Coming back from the editor / terminal: pick up whatever changed on disk meanwhile.
         ws._subs
             .push(cx.observe_window_activation(window, |ws, window, cx| {
@@ -372,6 +447,41 @@ impl Workspace {
         self.maybe_auto_fetch(cx);
     }
 
+    /// The repository list groups by GitHub owner, which comes from each repository's
+    /// origin. For repositories that have never been on screen (so nothing is cached for
+    /// them yet), read it once now, a couple of file reads each, and remember it.
+    fn learn_owners(&mut self, cx: &mut Context<Self>) {
+        let unknown: Vec<_> = self
+            .repos
+            .iter()
+            .filter(|r| r.entry.last_origin.is_none())
+            .map(|r| (r.entry.id, bridge::repo_facts(cx, r.entry.path.clone())))
+            .collect();
+        if unknown.is_empty() {
+            return;
+        }
+        cx.spawn(async move |ws, cx| {
+            let mut learned = Vec::new();
+            for (id, task) in unknown {
+                if let Ok(facts) = task.await {
+                    learned.push((id, facts));
+                }
+            }
+            let _ = ws.update(cx, |ws, cx| {
+                for (id, facts) in learned {
+                    if let Some(repo) = ws.repos.iter_mut().find(|r| r.entry.id == id) {
+                        repo.entry.last_origin = facts.origin.or(repo.entry.last_origin.take());
+                        repo.entry.last_branch =
+                            facts.head_branch.or(repo.entry.last_branch.take());
+                    }
+                }
+                ws.persist_repos(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn is_tab(&self, ix: usize) -> bool {
         self.repos.get(ix).is_some_and(|r| r.in_tabs)
     }
@@ -390,6 +500,47 @@ impl Workspace {
             if let Some(next) = after.or(before) {
                 self.activate(next, cx);
             }
+        }
+        self.persist_repos(cx);
+        cx.notify();
+    }
+
+    /// The index of the repository here whose origin is `owner/name` (any case).
+    pub(crate) fn find_repo_by_slug(&self, full_name: &str) -> Option<usize> {
+        self.repos.iter().position(|repo| {
+            repo.origin
+                .as_deref()
+                .or(repo.entry.last_origin.as_deref())
+                .and_then(external::repo_slug)
+                .is_some_and(|slug| slug.eq_ignore_ascii_case(full_name))
+        })
+    }
+
+    /// A repository's id, name and folder, for dialogs that talk about it.
+    pub(crate) fn repo_summary(&self, ix: usize) -> Option<(Ulid, String, String)> {
+        self.repos.get(ix).map(|r| {
+            (
+                r.entry.id,
+                r.entry.display_name.clone(),
+                r.entry.path.display().to_string(),
+            )
+        })
+    }
+
+    /// Remove a repository by id (positions can shift while a dialog is open).
+    pub(crate) fn remove_repo_id(&mut self, id: Ulid, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.repos.iter().position(|r| r.entry.id == id) {
+            self.close_repo(ix, window, cx);
+        }
+    }
+
+    /// "Close Other Tabs": every tab but this one is closed (the repositories stay).
+    pub fn close_other_tabs(&mut self, keep: usize, cx: &mut Context<Self>) {
+        for (ix, repo) in self.repos.iter_mut().enumerate() {
+            repo.in_tabs = ix == keep;
+        }
+        if self.active != keep {
+            self.activate(keep, cx);
         }
         self.persist_repos(cx);
         cx.notify();
@@ -445,7 +596,49 @@ impl Workspace {
 
     pub fn set_sidebar_tab(&mut self, tab: SidebarTab, cx: &mut Context<Self>) {
         self.sidebar_tab = tab;
+        // Coming back to Changes: show one of its files, not whatever commit was open.
+        if tab == SidebarTab::Changes {
+            self.ensure_file_selected(cx);
+        }
         cx.notify();
+    }
+
+    /// With the Changes tab showing and the repository having changes, the main pane shows
+    /// a file's diff instead of an empty "select a file" placeholder: the file already open
+    /// if it is still changed, otherwise the first one in the list. Leaves the Pull
+    /// Requests view, the History tab and a commit being read alone. Returns whether it
+    /// selected something (which also loads that diff).
+    pub(crate) fn ensure_file_selected(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.pulls.is_some()
+            || self.workflows.is_some()
+            || self.account.is_some()
+            || self.sidebar_tab != SidebarTab::Changes
+        {
+            return false;
+        }
+        let Some(repo) = self.active_repo() else {
+            return false;
+        };
+        let files = repo.changed_files();
+        let still_changed = match &self.selected {
+            Some(Selected::File { path }) => files.iter().any(|(file, _)| file == path),
+            _ => false,
+        };
+        if still_changed {
+            return false;
+        }
+        match files.into_iter().next() {
+            Some((path, _)) => {
+                self.select(Selected::File { path }, cx);
+                true
+            }
+            // Nothing left to show (everything was committed): drop the stale diff.
+            None if matches!(self.selected, Some(Selected::File { .. })) => {
+                self.clear_selection();
+                false
+            }
+            None => false,
+        }
     }
 
     /// Close the repository switcher popover. Its open state lives here (not inside the
@@ -583,6 +776,8 @@ impl Workspace {
     /// Show a changed file's diff or a commit's diff in the main pane.
     pub fn select(&mut self, selected: Selected, cx: &mut Context<Self>) {
         self.pulls = None;
+        self.workflows = None;
+        self.account = None;
         if self.selected.as_ref() != Some(&selected) {
             self.diff = None;
             self.diff_scroll.scroll_to_item(0, ScrollStrategy::Top);
@@ -598,6 +793,8 @@ impl Workspace {
 
     fn clear_selection(&mut self) {
         self.pulls = None;
+        self.workflows = None;
+        self.account = None;
         self.selected = None;
         self.diff = None;
     }
@@ -631,10 +828,21 @@ impl Workspace {
         let task = bridge::accounts(cx);
         cx.spawn(async move |ws, cx| {
             let accounts = task.await.unwrap_or_default();
-            let _ = ws.update(cx, |ws, cx| {
+            // Their pictures too (downloaded once, then read from the cache on disk).
+            let logins: Vec<String> = accounts.iter().map(|a| a.login.clone()).collect();
+            let avatars = ws.update(cx, |ws, cx| {
                 ws.accounts = accounts;
                 cx.notify();
+                bridge::account_avatars(cx, logins)
             });
+            if let Ok(avatars) = avatars
+                && let Ok(avatars) = avatars.await
+            {
+                let _ = ws.update(cx, |ws, cx| {
+                    ws.account_avatars.extend(avatars);
+                    cx.notify();
+                });
+            }
         })
         .detach();
     }
@@ -679,7 +887,12 @@ impl Workspace {
 
     /// "Open in Nermal": open the active repository's directory in the Nermal IDE.
     pub fn open_in_nermal(&mut self, cx: &mut Context<Self>) {
-        let Some(repo) = self.active_repo() else {
+        self.open_repo_in_nermal(self.active, cx);
+    }
+
+    /// Open one repository's folder in a new Nermal window (any tab, not just the active).
+    pub fn open_repo_in_nermal(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(repo) = self.repos.get(ix) else {
             return;
         };
         let task = bridge::open_in_nermal(cx, repo.entry.path.clone());
@@ -809,12 +1022,20 @@ impl Workspace {
                     Ok(Ok(statuses)) => {
                         repo.statuses = statuses;
                         repo.error = None;
+                        let changed: std::collections::HashSet<&str> =
+                            repo.statuses.iter().map(|s| s.path.as_str()).collect();
+                        repo.unchecked
+                            .retain(|path| changed.contains(path.as_str()));
                     }
                     Ok(Err(err)) => repo.error = Some(err.to_string()),
                     Err(err) => repo.error = Some(err.to_string()),
                 }
-                // The file on screen may just have changed, been staged, or been committed.
-                if matches!(ws.selected, Some(Selected::File { .. })) {
+                // Keep a file selected whenever there are changes (see `ensure_file_selected`);
+                // otherwise the file on screen may just have changed, so re-read its diff.
+                let is_active = ws.active_repo().is_some_and(|r| r.entry.id == id);
+                if !(is_active && ws.ensure_file_selected(cx))
+                    && matches!(ws.selected, Some(Selected::File { .. }))
+                {
                     ws.load_diff(cx);
                 }
                 cx.notify();
@@ -924,32 +1145,30 @@ impl Workspace {
         .detach();
     }
 
-    /// 展开 / 收起侧栏里「新建分支」的内联输入框。
-    pub fn toggle_new_branch(&mut self, cx: &mut Context<Self>) {
-        self.new_branch_open = !self.new_branch_open;
-        cx.notify();
-    }
-
-    /// 内联输入框的「创建」：取输入框里的名字新建分支，成功与否都收起输入框
-    /// （名字为空直接忽略，按钮在渲染层已经据此置灰，这里兜底）。
-    pub fn submit_new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = self.new_branch_input.read(cx).value().trim().to_string();
-        if name.is_empty() {
-            return;
+    /// Dismiss the error strip under the toolbar.
+    pub fn dismiss_action_error(&mut self, cx: &mut Context<Self>) {
+        if let Some(repo) = self.repos.get_mut(self.active) {
+            repo.action_error = None;
+            cx.notify();
         }
-        self.new_branch_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.new_branch_open = false;
-        self.create_branch(name, None, cx);
     }
 
     /// Fetch profile pictures for authors we haven't asked about yet.
     fn load_avatars(&mut self, emails: Vec<String>, cx: &mut Context<Self>) {
-        let wanted: Vec<String> = emails
+        let mut wanted: Vec<String> = emails
             .into_iter()
             .filter(|e| !e.is_empty() && !self.avatars.contains_key(e))
             .collect();
+        // Pictures already on disk show at once.
+        wanted.retain(|email| match anano_core::external::cached_avatar(email) {
+            Some(path) => {
+                self.avatars.insert(email.clone(), Some(path));
+                false
+            }
+            None => true,
+        });
         if wanted.is_empty() {
+            cx.notify();
             return;
         }
         for email in &wanted {
@@ -1032,6 +1251,28 @@ impl Workspace {
                 }
                 ws.refresh_active_status(cx);
                 ws.refresh_active_log(cx);
+                ws.refresh_active_branches(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Rename a local branch (the branch panel's right-click menu).
+    pub fn rename_branch(&mut self, old: String, new: String, cx: &mut Context<Self>) {
+        let Some(repo) = self.active_repo() else {
+            return;
+        };
+        if new.trim().is_empty() || new == old {
+            return;
+        }
+        let id = repo.entry.id;
+        let task = bridge::rename_branch(cx, repo.entry.path.clone(), old, new);
+        cx.spawn(async move |ws, cx| {
+            let result = task.await;
+            let _ = ws.update(cx, |ws, cx| {
+                if let Some(repo) = ws.repos.iter_mut().find(|r| r.entry.id == id) {
+                    repo.action_error = action_error(result);
+                }
                 ws.refresh_active_branches(cx);
             });
         })
@@ -1196,76 +1437,68 @@ impl Workspace {
         .detach();
     }
 
-    /// 状态列表里点一下「暂存」/「取消暂存」；成功后刷新一次 status。
-    pub fn toggle_stage(&mut self, file: String, currently_staged: bool, cx: &mut Context<Self>) {
-        let Some(repo) = self.active_repo() else {
-            return;
-        };
-        let path = repo.entry.path.clone();
-        let task = bridge::stage(cx, path, file, currently_staged);
-        cx.spawn(async move |ws, cx| {
-            let result = task.await;
-            let _ = ws.update(cx, |ws, cx| {
-                if !matches!(result, Ok(Ok(()))) {
-                    tracing::warn!("git stage/unstage failed: {result:?}");
-                }
-                ws.refresh_active_status(cx);
-            });
-        })
-        .detach();
+    /// Tick or untick one changed file for the next commit.
+    pub fn toggle_file(&mut self, file: String, cx: &mut Context<Self>) {
+        if let Some(repo) = self.repos.get_mut(self.active) {
+            if !repo.unchecked.remove(&file) {
+                repo.unchecked.insert(file);
+            }
+            cx.notify();
+        }
     }
 
-    /// 侧栏底部的「提交」：把 `commit_input` 里的文字当提交信息，提交当前仓库。
-    ///
-    /// 索引里如果还没有任何暂存内容，先把当前显示的全部改动暂存一遍再提交——
-    /// 覆盖最常见的「改完一批文件，一次性提交」场景，不强制用户先手动点某个文件的
-    /// 暂存按钮。已经手动挑过 stage/unstage 的文件视为用户的显式选择，原样尊重，
-    /// 不会被这里悄悄覆盖。空白信息或没有任何改动都直接忽略（按钮在渲染层已经据此
-    /// 置灰，这里兜底）。
+    /// The header checkbox: tick everything, or untick everything if it all already is.
+    pub fn toggle_all_files(&mut self, cx: &mut Context<Self>) {
+        if let Some(repo) = self.repos.get_mut(self.active) {
+            if repo.unchecked.is_empty() {
+                repo.unchecked = repo.changed_files().into_iter().map(|(p, _)| p).collect();
+            } else {
+                repo.unchecked.clear();
+            }
+            cx.notify();
+        }
+    }
+
+    /// The Commit button: commit the ticked files with the summary as the subject line
+    /// and the description, if any, as the body. Unticked files are left out and left alone.
+    /// Nothing ticked or no summary: nothing happens (the button is disabled for both).
     pub fn commit_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(repo) = self.active_repo() else {
             return;
         };
-        let message = self.commit_input.read(cx).value().trim().to_string();
-        if message.is_empty() || repo.statuses.is_empty() {
+        let summary = self.commit_input.read(cx).value().trim().to_string();
+        let description = self.commit_description.read(cx).value().trim().to_string();
+        let include = repo.checked_files();
+        if summary.is_empty() || include.is_empty() {
             return;
         }
-        let path = repo.entry.path.clone();
-        let need_stage_all = !repo.has_staged_changes();
+        let message = if description.is_empty() {
+            summary
+        } else {
+            format!("{summary}\n\n{description}")
+        };
+        let exclude: Vec<String> = repo.unchecked.iter().cloned().collect();
+        // Commit & push: the push half needs somewhere to push to.
+        let has_origin = repo.origin.is_some();
+        let task = bridge::commit_selected(cx, repo.entry.path.clone(), message, include, exclude);
         self.commit_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.commit_description
             .update(cx, |input, cx| input.set_value("", window, cx));
 
         cx.spawn(async move |ws, cx| {
-            if need_stage_all {
-                let stage_task = ws.update(cx, |_, cx| bridge::stage_all_changes(cx, path.clone()));
-                if let Ok(task) = stage_task {
-                    let _ = task.await;
-                }
-            }
-            let commit_task = ws.update(cx, |_, cx| {
-                bridge::commit(cx, path.clone(), message.clone())
-            });
-            let Ok(commit_task) = commit_task else {
-                return;
-            };
-            let result = commit_task.await;
+            let result = task.await;
             let committed = matches!(result, Ok(Ok(_)));
             let _ = ws.update(cx, |ws, cx| {
-                match result {
-                    Ok(Ok(_id)) => {}
-                    Ok(Err(err)) => tracing::warn!("git commit failed: {err}"),
-                    Err(err) => tracing::warn!("git commit failed: {err}"),
+                if let Some(repo) = ws.repos.get_mut(ws.active) {
+                    repo.action_error = action_error(result);
                 }
                 ws.refresh_active_status(cx);
                 ws.refresh_active_log(cx);
                 // The first commit is what brings the branch into existence, and every
-                // commit changes ahead/behind: without this the toolbar kept its old answer
-                // ("Detached HEAD" on a brand-new repository) until the window was refocused.
+                // commit changes ahead/behind.
                 ws.refresh_active_branches(cx);
-                // 「提交后自动 push」：只在 commit 真正成功时才追加，失败/无改动都不该
-                // 触发一次多余的网络往返。push 失败沿用它自己已有的 `action_error`
-                // 展示路径（`run_sync`），这里不用再单独处理一遍。
-                if committed && settings::settings(cx).push_on_commit {
+                if committed && has_origin {
                     ws.push(cx);
                 }
             });
@@ -1337,10 +1570,6 @@ impl Workspace {
         self.reset_workspace_panels(cx);
     }
 
-    pub fn set_theme(&mut self, pref: ThemePref, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_theme_with(pref, Some(window), cx);
-    }
-
     pub fn set_theme_global(&mut self, pref: ThemePref, cx: &mut Context<Self>) {
         self.set_theme_with(pref, None, cx);
     }
@@ -1358,10 +1587,6 @@ impl Workspace {
         apply_theme(pref, window, cx);
         self.persist_workspace(cx);
         cx.notify();
-    }
-
-    pub fn cycle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_theme(self.theme.next(), window, cx);
     }
 
     pub fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1424,7 +1649,7 @@ impl Workspace {
             .map(|(version, staged)| (version.clone(), staged));
         StatusBar::new()
             .py_0p5()
-            .right(h_flex().items_center().gap_0p5().when_some(
+            .right(h_flex().items_center().gap_1().when_some(
                 update_hint,
                 |bar, (version, staged)| {
                     bar.child(if staged {
@@ -1535,52 +1760,54 @@ impl Render for Workspace {
                 this.close_tab(ix, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &RevealRepository, _, cx| this.reveal_active_repo(cx)))
+            .on_action(
+                cx.listener(|this, _: &OpenRepositoryOnGitHub, _, cx| {
+                    this.open_active_on_github(cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &SyncNow, _, cx| this.sync_now(cx)))
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )
             .child(self.render_title_bar(cx))
             .when_some(banner(cx), |d, text| d.child(render_banner(text)))
             .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .items_stretch()
-                    .child(self.render_sidebar_rail(cx))
-                    .child(
-                        div().flex_1().min_w_0().h_full().child(
-                            h_resizable("workspace")
-                                .with_state(&self.sidebar_state)
-                                .on_resize(cx.listener(
-                                    |this, state: &Entity<ResizableState>, _, cx| {
-                                        this.on_sidebar_resized(state, cx)
-                                    },
-                                ))
-                                .child(
-                                    resizable_panel()
-                                        .size(sidebar_width)
-                                        .size_range(px(SIDEBAR_MIN_WIDTH)..px(SIDEBAR_MAX_WIDTH))
-                                        .flex_none()
-                                        .visible(!self.sidebar_collapsed)
-                                        .child(self.render_sidebar(window, cx)),
-                                )
-                                .child(
-                                    resizable_panel().child(
-                                        v_flex()
-                                            .size_full()
-                                            .min_w_0()
-                                            .children(self.render_toolbar(cx))
-                                            .child(self.render_tab_strip(cx))
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_h_0()
-                                                    .child(self.render_status_pane(cx)),
-                                            ),
-                                    ),
+                h_flex().flex_1().min_h_0().w_full().items_stretch().child(
+                    div().flex_1().min_w_0().h_full().child(
+                        h_resizable("workspace")
+                            .with_state(&self.sidebar_state)
+                            .on_resize(cx.listener(
+                                |this, state: &Entity<ResizableState>, _, cx| {
+                                    this.on_sidebar_resized(state, cx)
+                                },
+                            ))
+                            .child(
+                                resizable_panel()
+                                    .size(sidebar_width)
+                                    .size_range(px(SIDEBAR_MIN_WIDTH)..px(SIDEBAR_MAX_WIDTH))
+                                    .flex_none()
+                                    .visible(!self.sidebar_collapsed)
+                                    .child(self.render_sidebar(window, cx)),
+                            )
+                            .child(
+                                resizable_panel().child(
+                                    v_flex()
+                                        .size_full()
+                                        .min_w_0()
+                                        .children(self.render_toolbar(cx))
+                                        .children(self.render_repo_notice(cx))
+                                        .child(self.render_tab_strip(cx))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_h_0()
+                                                .child(self.render_status_pane(cx)),
+                                        ),
                                 ),
-                        ),
+                            ),
                     ),
+                ),
             )
             .child(self.render_status_bar(cx))
             .children(sheet_layer)
@@ -1701,6 +1928,229 @@ mod tests {
                 ws.activate(1, cx);
                 assert!(ws.is_tab(1), "picking it again didn't reopen its tab");
                 assert_eq!(ws.active_index(), 1);
+            });
+        });
+    }
+
+    /// The Changes tab end to end on a real repository: one row per file, untick one,
+    /// commit with a summary and a description, and only the ticked file is committed.
+    #[gpui_kit::test]
+    fn commit_takes_the_ticked_files_with_summary_and_description(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::bridge::init(cx);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", ""]);
+        git(&["config", "user.name", "test"]);
+        std::fs::write(repo.join("keep.txt"), "one\n").unwrap();
+        std::fs::write(repo.join("skip.txt"), "one\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        std::fs::write(repo.join("keep.txt"), "two\n").unwrap();
+        std::fs::write(repo.join("skip.txt"), "two\n").unwrap();
+
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        workspace.update(cx, |ws, cx| ws.open_repo_path(repo.clone(), cx));
+        let wait = |cx: &mut gpui_kit::VisualTestContext, done: &dyn Fn(&Workspace) -> bool| {
+            for _ in 0..300 {
+                cx.run_until_parked();
+                if workspace.read_with(cx, |ws, _| done(ws)) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!("timed out waiting for the repository");
+        };
+        wait(cx, &|ws| {
+            ws.active_repo().unwrap().changed_files().len() == 2
+        });
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |ws, cx| {
+                // Everything starts ticked; untick one.
+                assert_eq!(ws.active_repo().unwrap().checked_files().len(), 2);
+                ws.toggle_file("skip.txt".into(), cx);
+                assert_eq!(ws.active_repo().unwrap().checked_files(), ["keep.txt"]);
+                ws.commit_input
+                    .update(cx, |i, cx| i.set_value("Summary line", window, cx));
+                ws.commit_description
+                    .update(cx, |i, cx| i.set_value("Longer explanation.", window, cx));
+                ws.commit_active(window, cx);
+            });
+        });
+        wait(cx, &|ws| {
+            ws.active_repo().unwrap().changed_files().len() == 1
+        });
+
+        assert_eq!(
+            git(&["log", "-1", "--format=%B"]).trim(),
+            "Summary line\n\nLonger explanation."
+        );
+        assert_eq!(
+            git(&["show", "--name-only", "--format=", "HEAD"]).trim(),
+            "keep.txt"
+        );
+        workspace.read_with(cx, |ws, cx| {
+            let repo = ws.active_repo().unwrap();
+            assert_eq!(
+                repo.changed_files()[0].0,
+                "skip.txt",
+                "the unticked file was committed"
+            );
+            assert!(
+                ws.commit_input.read(cx).value().is_empty(),
+                "summary wasn't cleared"
+            );
+        });
+    }
+
+    /// Opening a repository that has changes shows the first changed file's diff straight
+    /// away, switching files works, and once everything is committed the stale diff goes.
+    #[gpui_kit::test]
+    fn the_first_changed_file_is_selected_by_default(cx: &mut gpui_kit::TestAppContext) {
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::bridge::init(cx);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&repo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", ""]);
+        git(&["config", "user.name", "test"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "one\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "two\n").unwrap();
+
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let wait = |cx: &mut gpui_kit::VisualTestContext, done: &dyn Fn(&Workspace) -> bool| {
+            for _ in 0..300 {
+                cx.run_until_parked();
+                if workspace.read_with(cx, |ws, _| done(ws)) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!("timed out");
+        };
+        workspace.update(cx, |ws, cx| ws.open_repo_path(repo.clone(), cx));
+        // No click: the first file is simply open, with its diff loaded.
+        wait(cx, &|ws| ws.diff.is_some());
+        workspace.read_with(cx, |ws, _| {
+            assert_eq!(
+                ws.selected(),
+                Some(&Selected::File {
+                    path: "a.txt".into()
+                })
+            );
+        });
+
+        // Switching files still works.
+        workspace.update(cx, |ws, cx| {
+            ws.select(
+                Selected::File {
+                    path: "b.txt".into(),
+                },
+                cx,
+            )
+        });
+        wait(cx, &|ws| ws.diff.is_some());
+        workspace.read_with(cx, |ws, _| {
+            assert_eq!(
+                ws.selected(),
+                Some(&Selected::File {
+                    path: "b.txt".into()
+                })
+            );
+        });
+
+        // Commit everything: nothing is left to show, so the stale diff goes away.
+        git(&["commit", "-qam", "all"]);
+        workspace.update(cx, |ws, cx| ws.refresh_active_status(cx));
+        wait(cx, &|ws| {
+            ws.active_repo().unwrap().changed_files().is_empty()
+        });
+        workspace.read_with(cx, |ws, _| assert_eq!(ws.selected(), None));
+    }
+
+    /// The right-click actions that replaced the cross buttons: closing other tabs keeps
+    /// the repositories, and removing a repository asks first (rename opens its dialog).
+    #[gpui_kit::test]
+    fn right_click_actions_close_other_tabs_and_ask_before_removing(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::component::WindowExt as _;
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::bridge::init(cx);
+        });
+        let mut workspace = None;
+        let window = cx.add_window(|window, cx| {
+            let ws = cx.new(|cx| Workspace::new(window, cx));
+            workspace = Some(ws.clone());
+            gpui_kit::component::Root::new(ws, window, cx)
+        });
+        let workspace = workspace.unwrap();
+        let cx = &mut gpui_kit::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |ws, cx| {
+                for name in ["a", "b", "c"] {
+                    ws.open_repo_path(PathBuf::from(format!("/tmp/anano-menu-{name}")), cx);
+                }
+                // Keep only "b": the others lose their tab but stay in the app.
+                ws.close_other_tabs(1, cx);
+                assert_eq!(ws.repo_count(), 3);
+                assert_eq!(ws.active_index(), 1);
+                assert!(ws.is_tab(1) && !ws.is_tab(0) && !ws.is_tab(2));
+                assert_eq!(ws.switcher_entries().len(), 3);
+
+                // Removing is a question first, and nothing is removed by asking.
+                ws.confirm_remove_repo(0, window, cx);
+                assert!(window.has_active_dialog(cx));
+                assert_eq!(ws.repo_count(), 3);
+            });
+            let _ = window.draw(cx);
+            window.close_dialog(cx);
+            workspace.update(cx, |ws, cx| {
+                ws.open_rename_branch_dialog("main".into(), window, cx);
+                assert!(window.has_active_dialog(cx));
+            });
+            let _ = window.draw(cx);
+            window.close_dialog(cx);
+            workspace.update(cx, |ws, cx| {
+                // Confirming removes by id, wherever that repository has moved to.
+                let (id, _, _) = ws.repo_summary(2).unwrap();
+                ws.remove_repo_id(id, window, cx);
+                assert_eq!(ws.repo_count(), 2);
             });
         });
     }

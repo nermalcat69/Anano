@@ -104,14 +104,14 @@ pub fn token(login: &str) -> Option<String> {
 }
 
 /// `gh`, acting as one specific connected account.
-fn gh_as(login: &str) -> Result<Command, String> {
+pub(crate) fn gh_as(login: &str) -> Result<Command, String> {
     let token = token(login).ok_or_else(|| format!("{login} isn't signed in to gh"))?;
     let mut gh = gh()?;
     gh.env("GH_TOKEN", token);
     Ok(gh)
 }
 
-fn gh_stdout(mut gh: Command) -> Result<String, String> {
+pub(crate) fn gh_stdout(mut gh: Command) -> Result<String, String> {
     let out = gh.output().map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -280,7 +280,7 @@ pub struct PullRequestDetail {
 }
 
 /// `2026-09-14T23:16:15Z` → Unix seconds (GitHub always answers in UTC, to the second).
-fn parse_time(iso: &str) -> i64 {
+pub(crate) fn parse_time(iso: &str) -> i64 {
     let num = |range: std::ops::Range<usize>| -> i64 {
         iso.get(range).and_then(|s| s.parse().ok()).unwrap_or(0)
     };
@@ -298,7 +298,7 @@ fn parse_time(iso: &str) -> i64 {
     days * 86_400 + num(11..13) * 3600 + num(14..16) * 60 + num(17..19)
 }
 
-fn text(v: &serde_json::Value) -> String {
+pub(crate) fn text(v: &serde_json::Value) -> String {
     v.as_str().unwrap_or_default().to_string()
 }
 
@@ -372,33 +372,402 @@ fn parse_pull_request_detail(v: &serde_json::Value) -> Option<PullRequestDetail>
     })
 }
 
-/// `gh pr …` for the repository behind `origin`, as the account that remote is pinned to
-/// (or gh's default account when it isn't pinned).
-fn gh_pr(origin: &str) -> Result<(Command, String), String> {
+/// `gh` for the repository behind `origin`, as the account that repository uses, plus the
+/// repository's `owner/name`.
+pub(crate) fn gh_repo(origin: &str) -> Result<(Command, String), String> {
     let slug = repo_slug(origin).ok_or("this repository's origin isn't on GitHub")?;
-    let mut gh = match account_of(origin) {
-        Some(login) => gh_as(login)?,
+    // Same account the repository syncs as (pin, then owner, then default).
+    let gh = match accounts_for(origin, &list_accounts()).first() {
+        Some(account) => gh_as(&account.login)?,
         None => gh()?,
     };
+    Ok((gh, slug))
+}
+
+/// `gh pr …` for the repository behind `origin`.
+fn gh_pr(origin: &str) -> Result<(Command, String), String> {
+    let (mut gh, slug) = gh_repo(origin)?;
     gh.arg("pr");
     Ok((gh, slug))
 }
 
 const PR_FIELDS: &str = "number,title,author,state,isDraft,headRefName,baseRefName,createdAt";
 
-/// The repository's pull requests, newest first, open and closed alike.
-pub fn list_pull_requests(origin: &str) -> Result<Vec<PullRequest>, String> {
-    let (mut gh, slug) = gh_pr(origin)?;
-    gh.args(["list", "--repo", &slug, "--state", "all", "--limit", "100"])
-        .args(["--json", PR_FIELDS]);
-    let json: serde_json::Value =
-        serde_json::from_str(&gh_stdout(gh)?).map_err(|e| e.to_string())?;
-    Ok(json
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(parse_pull_request)
-        .collect())
+/// Pull requests per page.
+pub const PULLS_PER_PAGE: usize = 30;
+/// GitHub's search never returns more than this many results for one query.
+pub const SEARCH_CAP: usize = 1000;
+/// The most pages one revalidation re-reads; deeper ones are loaded on demand.
+const MAX_REVALIDATE_PAGES: usize = 10;
+
+/// Which pull requests a query wants. "Closed" means closed without being merged; a draft
+/// counts as open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PullState {
+    #[default]
+    Open,
+    Merged,
+    Closed,
+    All,
+}
+
+impl PullState {
+    fn qualifier(self) -> &'static str {
+        match self {
+            PullState::Open => " is:open",
+            PullState::Merged => " is:merged",
+            PullState::Closed => " is:closed -is:merged",
+            PullState::All => "",
+        }
+    }
+
+    fn file_tag(self) -> &'static str {
+        match self {
+            PullState::Open => "open",
+            PullState::Merged => "merged",
+            PullState::Closed => "closed",
+            PullState::All => "all",
+        }
+    }
+}
+
+/// A pull request query: state, optionally one author, optionally free text (matched
+/// against titles and descriptions by GitHub's search).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PullSearch {
+    pub state: PullState,
+    pub author: Option<String>,
+    pub text: String,
+}
+
+impl PullSearch {
+    /// No author, no text: the one query whose results are cached on disk.
+    pub fn is_plain(&self) -> bool {
+        self.author.is_none() && self.text.trim().is_empty()
+    }
+
+    /// The query string for GitHub's search, scoped to one repository. A typed
+    /// `repo:` / `org:` / `user:` is dropped so a search can't wander out of it.
+    fn query(&self, slug: &str) -> String {
+        let mut q = format!("repo:{slug} is:pr{}", self.state.qualifier());
+        if let Some(author) = &self.author {
+            // Bots are `name[bot]` in lists but `app/name` to the search.
+            let author = match author.strip_suffix("[bot]") {
+                Some(name) => format!("app/{name}"),
+                None => author.clone(),
+            };
+            q.push_str(&format!(" author:{author}"));
+        }
+        for word in self.text.split_whitespace() {
+            let lower = word.to_ascii_lowercase();
+            if ["repo:", "org:", "user:"]
+                .iter()
+                .any(|p| lower.starts_with(p))
+            {
+                continue;
+            }
+            q.push(' ');
+            q.push_str(word);
+        }
+        q
+    }
+}
+
+/// How many pull requests each state holds for a query: what the tabs show, and the real
+/// totals (a page of the list only knows about the pages loaded so far).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PullCounts {
+    pub open: usize,
+    pub merged: usize,
+    pub closed: usize,
+}
+
+impl PullCounts {
+    pub fn all(&self) -> usize {
+        self.open + self.merged + self.closed
+    }
+}
+
+/// One page of results and how many there are in all.
+pub struct PullPage {
+    pub items: Vec<PullRequest>,
+    pub total: usize,
+}
+
+/// One item of GitHub's issue search, which pull requests are a kind of. Search reports
+/// merged pull requests as `closed`; `pull_request.merged_at` is what tells them apart.
+/// It carries no branch names, which only the detail view needs.
+fn parse_search_item(v: &serde_json::Value) -> Option<PullRequest> {
+    let state = match (
+        v["state"].as_str()?,
+        v["pull_request"]["merged_at"].is_string(),
+    ) {
+        ("open", _) => "OPEN",
+        (_, true) => "MERGED",
+        _ => "CLOSED",
+    };
+    Some(PullRequest {
+        number: v["number"].as_u64()?,
+        title: text(&v["title"]),
+        author: text(&v["user"]["login"]),
+        state: state.to_string(),
+        draft: v["draft"].as_bool().unwrap_or(false),
+        head: String::new(),
+        base: String::new(),
+        created_at: parse_time(v["created_at"].as_str().unwrap_or_default()),
+    })
+}
+
+fn parse_search_page(json: &str) -> Result<PullPage, String> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    Ok(PullPage {
+        items: value["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(parse_search_item)
+            .collect(),
+        total: value["total_count"].as_u64().unwrap_or(0) as usize,
+    })
+}
+
+fn search_issues(
+    origin: &str,
+    query: &str,
+    per_page: usize,
+    page: usize,
+) -> Result<String, String> {
+    let (mut gh, _) = gh_repo(origin)?;
+    gh.args(["api", "--method", "GET", "search/issues"])
+        .arg("-f")
+        .arg(format!("q={query}"))
+        .args(["-f", "sort=created", "-f", "order=desc"])
+        .arg("-F")
+        .arg(format!("per_page={per_page}"))
+        .arg("-F")
+        .arg(format!("page={page}"));
+    gh_stdout(gh)
+}
+
+/// One page (1-based) of the pull requests matching `search`, newest first.
+pub fn search_pull_requests(
+    origin: &str,
+    search: &PullSearch,
+    page: usize,
+) -> Result<PullPage, String> {
+    let slug = repo_slug(origin).ok_or("this repository's origin isn't on GitHub")?;
+    parse_search_page(&search_issues(
+        origin,
+        &search.query(&slug),
+        PULLS_PER_PAGE,
+        page,
+    )?)
+}
+
+/// Open / merged / closed totals for an author and text, three cheap searches run side by
+/// side.
+pub fn pull_counts(origin: &str, author: Option<&str>, text: &str) -> Result<PullCounts, String> {
+    let total = |state: PullState| -> Result<usize, String> {
+        let search = PullSearch {
+            state,
+            author: author.map(str::to_string),
+            text: text.to_string(),
+        };
+        search_pull_requests_total(origin, &search)
+    };
+    std::thread::scope(|scope| {
+        let open = scope.spawn(|| total(PullState::Open));
+        let merged = scope.spawn(|| total(PullState::Merged));
+        let closed = total(PullState::Closed);
+        let joined = |h: std::thread::ScopedJoinHandle<'_, Result<usize, String>>| {
+            h.join()
+                .unwrap_or_else(|_| Err("a count thread panicked".to_string()))
+        };
+        Ok(PullCounts {
+            open: joined(open)?,
+            merged: joined(merged)?,
+            closed: closed?,
+        })
+    })
+}
+
+fn search_pull_requests_total(origin: &str, search: &PullSearch) -> Result<usize, String> {
+    let slug = repo_slug(origin).ok_or("this repository's origin isn't on GitHub")?;
+    Ok(parse_search_page(&search_issues(origin, &search.query(&slug), 1, 1)?)?.total)
+}
+
+/// Re-read the first `pages` pages from GitHub. For a plain query this also replaces
+/// what was cached: the "revalidate" half of stale-while-revalidate, where the caller
+/// shows the cached list at once and swaps this one in, so a pull request that merged
+/// since is updated wherever it sits in the pages already loaded. Returns the list and the
+/// total number of matches.
+pub fn refresh_pull_requests(
+    origin: &str,
+    search: &PullSearch,
+    pages: usize,
+) -> Result<(Vec<PullRequest>, usize), String> {
+    let mut all = Vec::new();
+    let mut total = 0;
+    for page in 1..=pages.clamp(1, MAX_REVALIDATE_PAGES) {
+        let result = search_pull_requests(origin, search, page)?;
+        total = result.total;
+        let got = result.items.len();
+        all.extend(result.items);
+        if got < PULLS_PER_PAGE || all.len() >= total.min(SEARCH_CAP) {
+            break;
+        }
+    }
+    if search.is_plain() {
+        save_pull_cache(origin, search.state, &all, total);
+    }
+    Ok((all, total))
+}
+
+/// Fetch page `page` and append what isn't in `current` yet (a pull request opened since
+/// the first page was read shifts later ones down a page, so duplicates are expected).
+pub fn more_pull_requests(
+    origin: &str,
+    search: &PullSearch,
+    page: usize,
+    current: Vec<PullRequest>,
+) -> Result<(Vec<PullRequest>, usize), String> {
+    let result = search_pull_requests(origin, search, page)?;
+    let mut all = current;
+    for item in result.items {
+        if !all.iter().any(|pr| pr.number == item.number) {
+            all.push(item);
+        }
+    }
+    if search.is_plain() {
+        save_pull_cache(origin, search.state, &all, result.total);
+    }
+    Ok((all, result.total))
+}
+
+fn pull_cache_file(origin: &str, state: PullState) -> Option<PathBuf> {
+    // owner/name → a filename; never trust a repository name into a path.
+    let safe: String = repo_slug(origin)?
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Some(
+        cache_dir()?
+            .join("pulls")
+            .join(format!("{safe}-{}.json", state.file_tag())),
+    )
+}
+
+fn pulls_to_json(list: &[PullRequest], total: usize) -> String {
+    let prs: Vec<_> = list
+        .iter()
+        .map(|pr| {
+            serde_json::json!({
+                "number": pr.number, "title": pr.title, "author": pr.author,
+                "state": pr.state, "draft": pr.draft, "head": pr.head,
+                "base": pr.base, "created_at": pr.created_at,
+            })
+        })
+        .collect();
+    serde_json::json!({ "total": total, "prs": prs }).to_string()
+}
+
+fn pulls_from_json(json: &str) -> Option<(Vec<PullRequest>, usize)> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let list = v["prs"]
+        .as_array()?
+        .iter()
+        .filter_map(|p| {
+            Some(PullRequest {
+                number: p["number"].as_u64()?,
+                title: text(&p["title"]),
+                author: text(&p["author"]),
+                state: text(&p["state"]),
+                draft: p["draft"].as_bool().unwrap_or(false),
+                head: text(&p["head"]),
+                base: text(&p["base"]),
+                created_at: p["created_at"].as_i64().unwrap_or(0),
+            })
+        })
+        .collect();
+    Some((list, v["total"].as_u64().unwrap_or(0) as usize))
+}
+
+fn save_pull_cache(origin: &str, state: PullState, list: &[PullRequest], total: usize) {
+    if let Some(file) = pull_cache_file(origin, state)
+        && let Some(dir) = file.parent()
+        && std::fs::create_dir_all(dir).is_ok()
+    {
+        // Write-then-rename: a crash mid-write must not leave half a cache behind.
+        let part = file.with_extension("part");
+        if std::fs::write(&part, pulls_to_json(list, total)).is_ok() {
+            let _ = std::fs::rename(part, file);
+        }
+    }
+}
+
+/// What the last successful plain fetch saved for this repository and state: shown at once
+/// while a fresh copy is fetched behind it. May be stale, never wrong about a pull
+/// request's existence.
+pub fn cached_pull_requests(origin: &str, state: PullState) -> Option<(Vec<PullRequest>, usize)> {
+    pulls_from_json(&std::fs::read_to_string(pull_cache_file(origin, state)?).ok()?)
+}
+
+fn authors_cache_file(origin: &str) -> Option<PathBuf> {
+    let safe: String = repo_slug(origin)?
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Some(cache_dir()?.join("authors").join(format!("{safe}.txt")))
+}
+
+/// The people the author filter offers: the repository's contributors, most active first
+/// (up to 300), saved for next time.
+pub fn pull_authors(origin: &str) -> Result<Vec<String>, String> {
+    let (_, slug) = gh_repo(origin)?;
+    let mut logins: Vec<String> = Vec::new();
+    for page in 1..=3 {
+        let (mut gh, _) = gh_repo(origin)?;
+        gh.args([
+            "api",
+            "--method",
+            "GET",
+            &format!("repos/{slug}/contributors"),
+        ])
+        .args(["-F", "per_page=100", "-F"])
+        .arg(format!("page={page}"))
+        .args(["-q", ".[].login"]);
+        let got: Vec<String> = gh_stdout(gh)?.lines().map(str::to_string).collect();
+        let full = got.len() == 100;
+        logins.extend(got);
+        if !full {
+            break;
+        }
+    }
+    if let Some(file) = authors_cache_file(origin)
+        && let Some(dir) = file.parent()
+        && std::fs::create_dir_all(dir).is_ok()
+    {
+        let _ = std::fs::write(file, logins.join("\n"));
+    }
+    Ok(logins)
+}
+
+/// The author list saved by the last visit (instant; may be stale).
+pub fn cached_pull_authors(origin: &str) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(authors_cache_file(origin)?).ok()?;
+    Some(text.lines().map(str::to_string).collect())
 }
 
 pub fn pull_request(origin: &str, number: u64) -> Result<PullRequestDetail, String> {
@@ -418,6 +787,57 @@ pub fn pull_request(origin: &str, number: u64) -> Result<PullRequestDetail, Stri
     let json: serde_json::Value =
         serde_json::from_str(&gh_stdout(gh)?).map_err(|e| e.to_string())?;
     parse_pull_request_detail(&json).ok_or_else(|| "GitHub returned no pull request".to_string())
+}
+
+/// The whole pull request as a unified diff, already split into numbered files.
+pub fn pull_request_files(origin: &str, number: u64) -> Result<Vec<crate::git::PatchFile>, String> {
+    let (mut gh, slug) = gh_pr(origin)?;
+    gh.args([
+        "diff",
+        &number.to_string(),
+        "--repo",
+        &slug,
+        "--color",
+        "never",
+    ]);
+    Ok(crate::git::parse_patch(&gh_stdout(gh)?))
+}
+
+/// How a review ends, as GitHub's three buttons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReviewVerdict {
+    /// Feedback with no verdict.
+    #[default]
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+/// Submit a review of a pull request as the account the repository uses. GitHub requires
+/// words for a plain comment or a request for changes (an approval may be silent), and
+/// refuses reviews it doesn't allow (your own pull request, no access): its message comes
+/// back as the error.
+pub fn submit_review(
+    origin: &str,
+    number: u64,
+    verdict: ReviewVerdict,
+    body: &str,
+) -> Result<(), String> {
+    let body = body.trim();
+    if body.is_empty() && verdict != ReviewVerdict::Approve {
+        return Err("Write a message first: GitHub needs one for this kind of review.".into());
+    }
+    let (mut gh, slug) = gh_pr(origin)?;
+    gh.args(["review", &number.to_string(), "--repo", &slug]);
+    gh.arg(match verdict {
+        ReviewVerdict::Comment => "--comment",
+        ReviewVerdict::Approve => "--approve",
+        ReviewVerdict::RequestChanges => "--request-changes",
+    });
+    if !body.is_empty() {
+        gh.args(["--body", body]);
+    }
+    gh_stdout(gh).map(|_| ())
 }
 
 /// Merge a pull request with a merge commit. Whatever GitHub answers when it refuses
@@ -444,22 +864,9 @@ pub fn commit_web_url(origin: &str, sha: &str) -> Option<String> {
 /// doesn't know gets its generic identicon. Each email is downloaded once into the user
 /// cache directory and reused from then on. Note this sends the email to GitHub.
 pub fn avatar(email: &str) -> Option<PathBuf> {
-    use std::hash::{Hash, Hasher};
     if email.is_empty() {
         return None;
     }
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    email.to_lowercase().hash(&mut hasher);
-    let dir = cache_dir()?.join("avatars");
-    let stem = format!("{:016x}", hasher.finish());
-    // Stored with the extension matching its real format (the image loader goes by it).
-    for ext in ["png", "jpg", "gif"] {
-        let cached = dir.join(format!("{stem}.{ext}"));
-        if cached.is_file() {
-            return Some(cached);
-        }
-    }
-    std::fs::create_dir_all(&dir).ok()?;
     let escaped: String = email
         .bytes()
         .map(|b| match b {
@@ -467,13 +874,78 @@ pub fn avatar(email: &str) -> Option<PathBuf> {
             _ => format!("%{b:02X}"),
         })
         .collect();
+    cached_image(
+        &email.to_lowercase(),
+        &format!("https://avatars.githubusercontent.com/u/e?email={escaped}&s=64"),
+    )
+}
+
+/// A commit email's picture if it has been downloaded before (no network).
+pub fn cached_avatar(email: &str) -> Option<PathBuf> {
+    cached_file(&email.to_lowercase())
+}
+
+/// A connected account's own profile picture (toolbar account button), cached the same way.
+pub fn account_avatar(login: &str) -> Option<PathBuf> {
+    // Bots come as `dependabot[bot]` (REST) or `app/dependabot` (gh); the picture lives
+    // under the bare name.
+    let login = login.strip_prefix("app/").unwrap_or(login);
+    let login = login.strip_suffix("[bot]").unwrap_or(login);
+    // Logins are [A-Za-z0-9-]; anything else has no business in a URL path.
+    if login.is_empty() || !login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return None;
+    }
+    cached_image(
+        &format!("login:{}", login.to_lowercase()),
+        &format!("https://github.com/{login}.png?size=64"),
+    )
+}
+
+/// Where the picture for `key` lives in the avatar cache: the folder and the file stem.
+fn image_slot(key: &str) -> Option<(PathBuf, String)> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    Some((
+        cache_dir()?.join("avatars"),
+        format!("{:016x}", hasher.finish()),
+    ))
+}
+
+/// The picture for `key` if it is already on disk. Stored with the extension matching its
+/// real format (the image loader goes by it).
+fn cached_file(key: &str) -> Option<PathBuf> {
+    let (dir, stem) = image_slot(key)?;
+    ["png", "jpg", "gif"]
+        .into_iter()
+        .map(|ext| dir.join(format!("{stem}.{ext}")))
+        .find(|file| file.is_file())
+}
+
+/// A login's picture if it has been downloaded before: no network, safe to call while
+/// drawing a list, so logos that are already known show up on the first frame.
+pub fn cached_account_avatar(login: &str) -> Option<PathBuf> {
+    let login = login.strip_prefix("app/").unwrap_or(login);
+    let login = login.strip_suffix("[bot]").unwrap_or(login);
+    if login.is_empty() || !login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return None;
+    }
+    cached_file(&format!("login:{}", login.to_lowercase()))
+}
+
+/// Download `url` once into the avatar cache under a name derived from `key`, and hand
+/// back the local file from then on.
+fn cached_image(key: &str, url: &str) -> Option<PathBuf> {
+    if let Some(found) = cached_file(key) {
+        return Some(found);
+    }
+    let (dir, stem) = image_slot(key)?;
+    std::fs::create_dir_all(&dir).ok()?;
     let part = dir.join(format!("{stem}.part"));
     let fetched = Command::new("curl")
         .args(["-sfL", "--max-time", "10", "-o"])
         .arg(&part)
-        .arg(format!(
-            "https://avatars.githubusercontent.com/u/e?email={escaped}&s=64"
-        ))
+        .arg(url)
         .status()
         .is_ok_and(|s| s.success());
     let bytes = std::fs::read(&part).unwrap_or_default();
@@ -554,6 +1026,35 @@ pub fn account_of(url: &str) -> Option<&str> {
     }
     let authority = url["https://".len()..].split('/').next()?;
     authority.rsplit_once('@').map(|(login, _)| login)
+}
+
+/// The connected accounts in the order a repository would try them: the one it is pinned
+/// to (login in the URL); otherwise the one that owns it (`github.com/<login>/…`), since
+/// that is almost always the account you want for your own repositories; then the
+/// terminal's default; then the rest. The first entry is "the account this repository uses"
+/// as far as the UI is concerned.
+pub fn accounts_for(url: &str, accounts: &[Account]) -> Vec<Account> {
+    let pinned = account_of(url);
+    let owner = repo_slug(url).and_then(|slug| slug.split('/').next().map(str::to_string));
+    let rank = |a: &Account| {
+        let is = |login: Option<&str>| login.is_some_and(|l| l.eq_ignore_ascii_case(&a.login));
+        if is(pinned) {
+            0
+        } else if is(owner.as_deref()) {
+            1
+        } else if a.active {
+            2
+        } else {
+            3
+        }
+    };
+    let mut ordered = accounts.to_vec();
+    ordered.sort_by_key(rank);
+    // A pin names exactly one account; don't fall through to others behind its back.
+    if pinned.is_some() {
+        ordered.truncate(1);
+    }
+    ordered
 }
 
 /// Whether `url` is a GitHub remote an account can be picked for.
@@ -692,6 +1193,55 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_uses_its_pin_then_its_owner_then_the_default_account() {
+        let accounts = [
+            Account {
+                login: "arjunowo".into(),
+                active: true,
+            },
+            Account {
+                login: "nermalcat69".into(),
+                active: false,
+            },
+        ];
+        let first = |url: &str| accounts_for(url, &accounts)[0].login.clone();
+        // Unpinned: whoever owns the repository, even if another account is the default.
+        assert_eq!(
+            first("https://github.com/nermalcat69/Anano.git"),
+            "nermalcat69"
+        );
+        assert_eq!(first("https://github.com/arjunowo/site.git"), "arjunowo");
+        assert_eq!(first("git@github.com:NermalCat69/Anano.git"), "nermalcat69");
+        // Someone else's repository: the default account.
+        assert_eq!(first("https://github.com/rust-lang/rust.git"), "arjunowo");
+        // A pin always wins, and nothing else is tried behind it.
+        let pinned = accounts_for(
+            "https://arjunowo@github.com/nermalcat69/Anano.git",
+            &accounts,
+        );
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0].login, "arjunowo");
+    }
+
+    #[test]
+    fn cached_logos_are_looked_up_without_the_network_and_only_for_real_logins() {
+        // Nothing here may touch a path or a URL: odd names are refused outright.
+        for bad in ["", "a/b", "a b", "../x", "a?b"] {
+            assert_eq!(cached_account_avatar(bad), None, "{bad:?}");
+        }
+        // A well-formed login nobody has downloaded is simply absent, not an error.
+        assert_eq!(
+            cached_account_avatar("anano-test-nobody-has-this-login-xyz"),
+            None
+        );
+        // Bots resolve to the same file as their bare name.
+        assert_eq!(
+            cached_account_avatar("app/anano-test-nobody-bot"),
+            cached_account_avatar("anano-test-nobody-bot[bot]")
+        );
+    }
+
+    #[test]
     fn commit_web_url_handles_every_github_remote_shape() {
         for origin in [
             "https://github.com/o/r.git",
@@ -744,6 +1294,90 @@ mod tests {
             repo_slug("https://me@github.com/o/r.git").as_deref(),
             Some("o/r")
         );
+    }
+
+    #[test]
+    fn search_results_parse_merged_closed_and_open_apart() {
+        let page = r#"{"total_count":57,"items":[
+          {"number":3,"title":"c","state":"open","draft":true,"user":{"login":"me"},
+           "created_at":"2026-09-14T23:16:15Z","pull_request":{"merged_at":null}},
+          {"number":2,"title":"b","state":"closed","draft":false,"user":{"login":"you"},
+           "created_at":"2026-09-13T00:00:00Z","pull_request":{"merged_at":"2026-09-15T00:00:00Z"}},
+          {"number":1,"title":"a","state":"closed","draft":false,"user":{"login":"you"},
+           "created_at":"2026-09-12T00:00:00Z","pull_request":{"merged_at":null}}]}"#;
+        let result = parse_search_page(page).unwrap();
+        assert_eq!(result.total, 57, "the real total, not just this page");
+        let states: Vec<_> = result
+            .items
+            .iter()
+            .map(|p| (p.number, p.state.as_str(), p.draft))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                (3, "OPEN", true),
+                (2, "MERGED", false),
+                (1, "CLOSED", false)
+            ]
+        );
+        assert_eq!(result.items[0].created_at, 1_789_427_775);
+    }
+
+    #[test]
+    fn search_queries_are_scoped_to_the_repository() {
+        let q = |state, author: Option<&str>, text: &str| {
+            PullSearch {
+                state,
+                author: author.map(str::to_string),
+                text: text.to_string(),
+            }
+            .query("o/r")
+        };
+        assert_eq!(q(PullState::Open, None, ""), "repo:o/r is:pr is:open");
+        assert_eq!(q(PullState::Merged, None, ""), "repo:o/r is:pr is:merged");
+        assert_eq!(
+            q(PullState::Closed, None, ""),
+            "repo:o/r is:pr is:closed -is:merged"
+        );
+        assert_eq!(
+            q(PullState::All, Some("me"), "fix  bug"),
+            "repo:o/r is:pr author:me fix bug"
+        );
+        assert_eq!(
+            q(PullState::Open, Some("dependabot[bot]"), ""),
+            "repo:o/r is:pr is:open author:app/dependabot"
+        );
+        // A typed repo: / org: / user: can't take the search somewhere else.
+        assert_eq!(
+            q(PullState::All, None, "fix repo:evil/x ORG:evil"),
+            "repo:o/r is:pr fix"
+        );
+        assert!(PullSearch::default().is_plain());
+        assert!(
+            !PullSearch {
+                text: "x".into(),
+                ..Default::default()
+            }
+            .is_plain()
+        );
+    }
+
+    #[test]
+    fn the_pull_request_cache_round_trips() {
+        let list = vec![PullRequest {
+            number: 7,
+            title: "T \"quoted\"".into(),
+            author: "me".into(),
+            state: "MERGED".into(),
+            draft: false,
+            head: String::new(),
+            base: String::new(),
+            created_at: 1_789_427_775,
+        }];
+        let (back, total) = pulls_from_json(&pulls_to_json(&list, 412)).unwrap();
+        assert_eq!(back, list);
+        assert_eq!(total, 412);
+        assert_eq!(pulls_from_json("not json"), None);
     }
 
     #[test]

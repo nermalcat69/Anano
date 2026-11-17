@@ -29,7 +29,15 @@ use crate::state::workspace::Workspace;
 
 actions!(
     anano,
-    [OpenRepoAction, CloseTab, ToggleSidebar, OpenSettings]
+    [
+        OpenRepoAction,
+        CloseTab,
+        ToggleSidebar,
+        OpenSettings,
+        RevealRepository,
+        OpenRepositoryOnGitHub,
+        SyncNow
+    ]
 );
 
 /// X11 的窗口图标：解码内嵌 logo。解码失败（不该发生，资源是编译期嵌入的）就没图标，不影响启动。
@@ -51,6 +59,11 @@ fn primary(key: &str) -> String {
         format!("ctrl-{key}")
     }
 }
+
+/// The smallest the window can be made; see `window_min_size` below.
+const MIN_WIDTH: f32 =
+    state::workspace::SIDEBAR_DEFAULT_WIDTH + ui::toolbar::MIN_TOOLBAR_WIDTH + 4.;
+const MIN_HEIGHT: f32 = 700.;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -78,6 +91,9 @@ fn main() {
                 KeyBinding::new(&primary("w"), CloseTab, None),
                 KeyBinding::new(&primary("b"), ToggleSidebar, None),
                 KeyBinding::new(&primary(","), OpenSettings, None),
+                KeyBinding::new(&primary("shift-f"), RevealRepository, None),
+                KeyBinding::new(&primary("shift-g"), OpenRepositoryOnGitHub, None),
+                KeyBinding::new(&primary("p"), SyncNow, None),
             ]);
 
             // 客户端自绘标题栏（spec §7.2）：TitleBar::window_options() 提供透明 titlebar、红绿灯位置与
@@ -85,7 +101,11 @@ fn main() {
             // 得不到时 gpui 回退到服务端装饰、TitleBar 自动不画控制按钮。
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
-                window_min_size: Some(size(px(800.), px(520.))),
+                // Small enough to tile beside an editor, big enough that nothing is cut off:
+                // the default-width sidebar plus the whole toolbar (branch, sync, pull
+                // requests, account) across, and the tallest dialog (Create a New
+                // Repository) down.
+                window_min_size: Some(size(px(MIN_WIDTH), px(MIN_HEIGHT))),
                 #[cfg(target_os = "linux")]
                 window_background: WindowBackgroundAppearance::Transparent,
                 #[cfg(target_os = "linux")]

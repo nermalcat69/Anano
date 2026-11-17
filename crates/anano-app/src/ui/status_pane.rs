@@ -23,7 +23,7 @@ const ROW_HEIGHT: f32 = 20.;
 const GUTTER_WIDTH: f32 = 44.;
 const FILES_WIDTH: f32 = 240.;
 
-fn diff_row(line: &DiffLine, cx: &App) -> AnyElement {
+pub(crate) fn diff_row(ix: usize, line: &DiffLine, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     if line.kind == LineKind::File {
@@ -34,7 +34,11 @@ fn diff_row(line: &DiffLine, cx: &App) -> AnyElement {
             .bg(theme.secondary)
             .text_xs()
             .font_weight(FontWeight::SEMIBOLD)
-            .child(div().truncate().child(line.text.clone()))
+            .child(
+                div()
+                    .truncate()
+                    .child(crate::ui::selectable(("diff-file", ix), line.text.clone())),
+            )
             .into_any_element();
     }
     let (marker, tint) = match line.kind {
@@ -70,7 +74,10 @@ fn diff_row(line: &DiffLine, cx: &App) -> AnyElement {
                 .min_w_0()
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .child(line.text.replace('\t', "    ")),
+                .child(crate::ui::selectable(
+                    ("diff-text", ix),
+                    line.text.replace('\t', "    "),
+                )),
         )
         .into_any_element()
 }
@@ -91,14 +98,7 @@ impl Workspace {
     /// Title + subtitle for the header above the diff.
     fn diff_heading(&self, selected: &Selected) -> (SharedString, SharedString) {
         match selected {
-            Selected::File { path, staged } => (
-                path.clone().into(),
-                if *staged {
-                    tr!("repo.status.staged_title")
-                } else {
-                    tr!("repo.status.unstaged_title")
-                },
-            ),
+            Selected::File { path } => (path.clone().into(), SharedString::default()),
             Selected::Commit(id) => {
                 let commit = self
                     .active_repo()
@@ -131,6 +131,12 @@ impl Workspace {
         if let Some(pulls) = &self.pulls {
             return pane.child(self.render_pull_requests(pulls, cx));
         }
+        if let Some(workflows) = &self.workflows {
+            return pane.child(self.render_workflows(workflows, cx));
+        }
+        if let Some(account) = &self.account {
+            return pane.child(self.render_account(account, cx));
+        }
         let Some(repo) = self.active_repo() else {
             return centered(pane)
                 .text_color(muted)
@@ -138,6 +144,10 @@ impl Workspace {
                 .child(div().text_xs().child(tr!("repo.none_open_hint")));
         };
         let Some(selected) = self.selected() else {
+            // Nothing to commit: say so, and suggest what to do next.
+            if let Some(panel) = self.render_no_changes(repo, cx) {
+                return pane.child(panel);
+            }
             return centered(pane)
                 .child(
                     div()
@@ -213,7 +223,7 @@ impl Workspace {
                             .min_w_0()
                             .truncate()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(title),
+                            .child(crate::ui::selectable("diff-title", title)),
                     )
                     .child(
                         div()
@@ -277,6 +287,7 @@ impl Workspace {
                             let scroll = self.diff_scroll.clone();
                             div()
                                 .id(("changed-file", ix))
+                                .flex_none()
                                 .px_3()
                                 .py_1p5()
                                 .text_sm()
@@ -291,10 +302,7 @@ impl Workspace {
                 });
                 let view: Rc<DiffView> = view.clone();
                 let lines = uniform_list("diff-lines", view.lines.len(), move |range, _, cx| {
-                    view.lines[range]
-                        .iter()
-                        .map(|line| diff_row(line, cx))
-                        .collect()
+                    range.map(|ix| diff_row(ix, &view.lines[ix], cx)).collect()
                 })
                 .track_scroll(&self.diff_scroll)
                 .flex_1()

@@ -3,7 +3,7 @@
 //! 不是 `Entity<T>`——不像 `RequestTab` 那样持有子实体（`InputState` / `KvTable`），
 //! 纯数据放在 [`crate::state::workspace::Workspace`] 的 `Vec` 里就够了。
 
-use anano_core::git::{Branch, CommitInfo, FileStatus, LfsSync, RepoEntry};
+use anano_core::git::{Branch, ChangeKind, CommitInfo, FileStatus, LfsSync, RepoEntry};
 
 pub struct OpenRepo {
     pub entry: RepoEntry,
@@ -32,6 +32,9 @@ pub struct OpenRepo {
     /// Whether `origin` / `head_branch` / `last_fetched` have been read from git yet.
     /// Whether it has a tab in the tab strip. Closing a tab clears this and nothing else:
     /// the repository stays in the app (and in the repository list) until it is removed.
+    /// Changed files the user unticked: left out of the next commit. Everything else that
+    /// is changed is ticked, so a new change is included by default.
+    pub unchecked: std::collections::HashSet<String>,
     pub in_tabs: bool,
     pub facts_loaded: bool,
     pub needs_fetch: bool,
@@ -63,6 +66,7 @@ impl OpenRepo {
             origin: None,
             last_fetched: None,
             head_branch: None,
+            unchecked: Default::default(),
             in_tabs: true,
             facts_loaded: false,
             needs_fetch: true,
@@ -92,15 +96,37 @@ impl OpenRepo {
             })
     }
 
-    pub fn staged(&self) -> impl Iterator<Item = &FileStatus> {
-        self.statuses.iter().filter(|s| s.staged)
+    /// The changes list: one row per changed file, however git splits it between the
+    /// index and the working tree. When a path has two entries the more telling kind wins
+    /// (a file that is new in the index and then edited again is still "new").
+    pub fn changed_files(&self) -> Vec<(String, ChangeKind)> {
+        fn weight(kind: ChangeKind) -> u8 {
+            match kind {
+                ChangeKind::Conflicted => 5,
+                ChangeKind::New => 4,
+                ChangeKind::Deleted => 3,
+                ChangeKind::Renamed => 2,
+                ChangeKind::TypeChange => 1,
+                ChangeKind::Modified => 0,
+            }
+        }
+        let mut files: Vec<(String, ChangeKind)> = Vec::new();
+        for status in &self.statuses {
+            match files.iter_mut().find(|(path, _)| *path == status.path) {
+                Some((_, kind)) if weight(status.kind) > weight(*kind) => *kind = status.kind,
+                Some(_) => {}
+                None => files.push((status.path.clone(), status.kind)),
+            }
+        }
+        files
     }
 
-    pub fn unstaged(&self) -> impl Iterator<Item = &FileStatus> {
-        self.statuses.iter().filter(|s| !s.staged)
-    }
-
-    pub fn has_staged_changes(&self) -> bool {
-        self.statuses.iter().any(|s| s.staged)
+    /// The ticked changed files: what the Commit button will commit.
+    pub fn checked_files(&self) -> Vec<String> {
+        self.changed_files()
+            .into_iter()
+            .map(|(path, _)| path)
+            .filter(|path| !self.unchecked.contains(path))
+            .collect()
     }
 }

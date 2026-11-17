@@ -7,11 +7,11 @@ use std::time::SystemTime;
 
 use anano_core::git::Branch;
 use gpui_kit::component::{
-    ActiveTheme, Icon, IconName,
+    ActiveTheme, Icon, IconName, Sizable,
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputState},
-    menu::{PopupMenu, PopupMenuItem},
+    menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     popover::Popover,
     v_flex,
 };
@@ -22,51 +22,34 @@ use gpui_kit::{
 };
 
 use crate::assets::{
-    ICON_GIT_BRANCH, ICON_PULL_REQUEST, ICON_REFRESH, ICON_TRASH, ICON_UPLOAD_CLOUD,
+    ICON_GIT_BRANCH, ICON_PULL_REQUEST, ICON_REFRESH, ICON_UPLOAD_CLOUD, ICON_WORKFLOW,
 };
 use crate::i18n::tr;
 use crate::state::repos::SyncKind;
 use crate::state::workspace::Workspace;
+use crate::ui::account_view::AccountPage;
 
 const TOOLBAR_HEIGHT: f32 = 52.;
-const BUTTON_WIDTH: f32 = 260.;
+/// Each big button is as wide as its content needs and no wider. A width is the button's
+/// fixed chrome (padding, icon, gap: 46px) plus the widest text it ever shows, and real
+/// fonts run wider than a character count suggests, so these are generous: a label that
+/// is cut off is worse than a few spare pixels.
+///   - branch: "Current Branch" over a typical branch name, and the chevron;
+///   - sync: "Fetched 10hr ago" / "Publish to GitHub", and "Push origin ↑2" on the title line;
+///   - Pull Requests: "Pull Requests" over "Review & merge";
+///   - Workflows: "Workflows" over "Runs & logs".
+const BRANCH_WIDTH: f32 = 196.;
+const SYNC_WIDTH: f32 = 190.;
+const PULLS_WIDTH: f32 = 190.;
+const WORKFLOWS_WIDTH: f32 = 160.;
+/// The account button on the right: picture, name (cut with an ellipsis if very long), chevron.
+const ACCOUNT_WIDTH: f32 = 172.;
+/// The toolbar's width when everything is showing: the window must be at least this much
+/// wider than the sidebar, or the account button falls off the right edge.
+pub const MIN_TOOLBAR_WIDTH: f32 =
+    BRANCH_WIDTH + SYNC_WIDTH + PULLS_WIDTH + WORKFLOWS_WIDTH + ACCOUNT_WIDTH;
 /// The branch panel is wider than its button: names plus "2 months ago" need the room.
 const PANEL_WIDTH: f32 = 380.;
-
-/// Branch entries shared by the toolbar button and the sidebar's branch row: one item per
-/// local branch (the checked one is current), each other branch followed by its delete.
-pub(crate) fn branch_menu(
-    menu: PopupMenu,
-    branches: &[Branch],
-    workspace: &Entity<Workspace>,
-) -> PopupMenu {
-    branches.iter().fold(menu, |menu, branch| {
-        let is_head = branch.is_head;
-        let (switch_ws, delete_ws) = (workspace.clone(), workspace.clone());
-        let (switch_to, delete) = (branch.name.clone(), branch.name.clone());
-        let menu = menu.item(
-            PopupMenuItem::new(branch.name.clone())
-                .checked(is_head)
-                .on_click(move |_, window, cx| {
-                    if !is_head {
-                        switch_ws.update(cx, |ws, cx| {
-                            ws.request_switch_branch(switch_to.clone(), window, cx)
-                        });
-                    }
-                }),
-        );
-        if is_head {
-            return menu;
-        }
-        menu.item(
-            PopupMenuItem::new(tr!("repo.branch.delete", name = branch.name.clone()))
-                .icon(Icon::empty().path(ICON_TRASH))
-                .on_click(move |_, _, cx| {
-                    delete_ws.update(cx, |ws, cx| ws.delete_branch(delete.clone(), cx));
-                }),
-        )
-    })
-}
 
 /// The "Current Branch" panel: a filter box and a New Branch button, then the branches
 /// (default branch first), each with a check when current and how long ago it last moved.
@@ -92,8 +75,10 @@ fn branch_panel(
     let row = |ix: usize, branch: &Branch| {
         let (name, is_head) = (branch.name.clone(), branch.is_head);
         let workspace = workspace.clone();
+        let menu_workspace = workspace.clone();
         h_flex()
             .id(("branch-row", ix))
+            .flex_none()
             .gap_2()
             .px_2()
             .py_1p5()
@@ -131,6 +116,53 @@ fn branch_panel(
                         ws.request_switch_branch(name, window, cx);
                     }
                 });
+            })
+            // Rename and delete are in the right-click menu, never a button on the row.
+            .context_menu({
+                let (menu_ws, menu_name) = (menu_workspace, branch.name.clone());
+                move |menu, _, _| {
+                    let item = |label: SharedString,
+                                act: fn(
+                        &mut Workspace,
+                        String,
+                        &mut gpui_kit::Window,
+                        &mut Context<Workspace>,
+                    )| {
+                        let (ws, name) = (menu_ws.clone(), menu_name.clone());
+                        PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                            let (ws, name) = (ws.clone(), name.clone());
+                            // Next frame: the menu and the branch panel have closed by then.
+                            window.defer(cx, move |window, cx| {
+                                ws.update(cx, |ws, cx| {
+                                    ws.close_branch_popover(cx);
+                                    act(ws, name, window, cx)
+                                });
+                            });
+                        })
+                    };
+                    let copy_name = menu_name.clone();
+                    let menu = menu.item(item(
+                        tr!("repo.branch.rename_menu"),
+                        |ws, name, window, cx| ws.open_rename_branch_dialog(name, window, cx),
+                    ));
+                    let menu = if is_head {
+                        menu
+                    } else {
+                        menu.item(item(
+                            tr!("repo.branch.delete_menu"),
+                            |ws, name, window, cx| ws.confirm_delete_branch(name, window, cx),
+                        ))
+                    };
+                    menu.separator().item(
+                        PopupMenuItem::new(tr!("repo.branch.copy_name")).on_click(
+                            move |_, _, cx| {
+                                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                    copy_name.clone(),
+                                ))
+                            },
+                        ),
+                    )
+                }
             })
     };
     let section = |title: SharedString, default: bool| {
@@ -234,7 +266,7 @@ fn ago(secs: u64) -> SharedString {
 }
 
 /// What the sync button should do next, GitHub Desktop's order of precedence.
-fn next_sync(branch: Option<&Branch>) -> (SyncKind, SharedString) {
+pub(crate) fn next_sync(branch: Option<&Branch>) -> (SyncKind, SharedString) {
     match branch {
         Some(b) if b.upstream.is_none() => (SyncKind::Push, tr!("repo.toolbar.publish")),
         Some(Branch {
@@ -278,22 +310,27 @@ fn big_label(
 /// size of its own, and padding gets applied at both levels: that is what left the branch
 /// button smaller and off-centre next to the plain sync one. A pixel size means the same
 /// thing at both levels, so both buttons come out exactly slot-sized; the content pads.
-fn big_button(id: &'static str) -> Button {
+fn big_button(id: &'static str, width: f32) -> Button {
     crate::ui::button(id)
         .ghost()
         // The slot minus its 1px divider, the toolbar minus its 1px bottom border.
-        .w(px(BUTTON_WIDTH - 1.))
+        .w(px(width - 1.))
         .h(px(TOOLBAR_HEIGHT - 1.))
         .rounded_none()
 }
 
 /// One fixed-width cell of the toolbar.
-fn slot(selector: &'static str, border: Hsla, button: impl IntoElement) -> impl IntoElement {
+fn slot(
+    selector: &'static str,
+    width: f32,
+    border: Hsla,
+    button: impl IntoElement,
+) -> impl IntoElement {
     div()
         .debug_selector(move || selector.into())
         .flex_none()
         .h_full()
-        .w(px(BUTTON_WIDTH))
+        .w(px(width))
         .border_r_1()
         .border_color(border)
         .child(button)
@@ -304,8 +341,8 @@ fn content(selector: &'static str) -> gpui_kit::Div {
     h_flex()
         .debug_selector(move || selector.into())
         .size_full()
-        .px_3()
-        .gap_3()
+        .px_2()
+        .gap_2p5()
         .items_center()
 }
 
@@ -332,6 +369,87 @@ impl Workspace {
             .as_deref()
             .is_some_and(anano_core::external::is_github);
         let filter = self.branch_filter.clone();
+
+        // Which connected GitHub account this repository syncs as (GitHub remotes only).
+        let logins = self.account_logins();
+        let account_menu = repo
+            .origin
+            .as_deref()
+            .filter(|url| !logins.is_empty() && anano_core::external::is_github(url))
+            .map(|url| {
+                // Show the account this repository actually syncs as, pinned or not: its
+                // owner's account for your own repositories, otherwise the default. Picking
+                // another one here pins the repository to it.
+                let pinned = anano_core::external::accounts_for(url, &self.accounts)
+                    .first()
+                    .map(|a| a.login.clone());
+                let menu_ws = cx.entity();
+                let label = pinned
+                    .clone()
+                    .map(SharedString::from)
+                    .unwrap_or_else(|| tr!("repo.sync.account"));
+                // A proper button, not a small icon: the account's picture (cached on disk
+                // after the first download) and its name.
+                let picture = pinned
+                    .as_ref()
+                    .and_then(|login| self.account_avatars.get(login))
+                    .and_then(|p| p.as_ref());
+                let face = crate::ui::avatar(picture, &label, px(26.), cx);
+                crate::ui::button("toolbar-account")
+                    .ghost()
+                    .w(px(ACCOUNT_WIDTH - 16.))
+                    .h(px(38.))
+                    .tooltip(tr!("repo.sync.account_tooltip"))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(face)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(label),
+                            )
+                            .child(Icon::new(IconName::ChevronDown).size_4()),
+                    )
+                    .dropdown_menu(move |menu, _, _| {
+                        // Which account this repository uses (and the views below browse).
+                        let menu = menu.item(PopupMenuItem::label(tr!("repo.account.switch")));
+                        let menu = logins.iter().fold(menu, |menu, login| {
+                            let menu_ws = menu_ws.clone();
+                            let checked = pinned.as_deref() == Some(login.as_str());
+                            let login = login.clone();
+                            menu.item(PopupMenuItem::new(login.clone()).checked(checked).on_click(
+                                move |_, _, cx| {
+                                    menu_ws
+                                        .update(cx, |ws, cx| ws.switch_account(login.clone(), cx));
+                                },
+                            ))
+                        });
+                        // What the account has on GitHub, cloned or not.
+                        let browse = |label: SharedString, page: AccountPage| {
+                            let (ws, login) = (menu_ws.clone(), pinned.clone());
+                            PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                                let (ws, login, page) = (ws.clone(), login.clone(), page.clone());
+                                // Next frame: the menu has closed by then.
+                                window.defer(cx, move |_, cx| {
+                                    if let Some(login) = login {
+                                        ws.update(cx, |ws, cx| {
+                                            ws.open_account_view(login, page, cx)
+                                        });
+                                    }
+                                });
+                            })
+                        };
+                        menu.separator()
+                            .item(browse(tr!("repo.account.view_repos"), AccountPage::Repos))
+                            .item(browse(tr!("repo.account.view_orgs"), AccountPage::Orgs))
+                    })
+            });
 
         let (kind, title) = next_sync(current);
         let syncing = repo.syncing.is_some();
@@ -368,6 +486,7 @@ impl Workspace {
                 .border_color(border)
                 .child(slot(
                     "toolbar-branch-slot",
+                    BRANCH_WIDTH,
                     border,
                     Popover::new("toolbar-branch-popover")
                         .open(open)
@@ -377,7 +496,7 @@ impl Workspace {
                         }))
                         .trigger_style(gpui_kit::StyleRefinement::default())
                         .trigger(
-                            big_button("toolbar-branch").child(
+                            big_button("toolbar-branch", BRANCH_WIDTH).child(
                                 content("toolbar-branch-content")
                                     .child(Icon::empty().path(ICON_GIT_BRANCH).size_5())
                                     .child(big_label(
@@ -400,18 +519,51 @@ impl Workspace {
                 ))
                 .child(slot(
                     "toolbar-sync-slot",
+                    SYNC_WIDTH,
                     border,
-                    big_button("toolbar-sync")
+                    big_button("toolbar-sync", SYNC_WIDTH)
                         .loading(syncing)
                         .child(
                             content("toolbar-sync-content")
                                 .when(!syncing, |h| {
                                     h.child(Icon::empty().path(sync_icon).size_5())
                                 })
-                                .child(big_label(title, subtitle, true, muted))
-                                .children(counts.map(|counts| {
-                                    div().flex_none().text_xs().text_color(muted).child(counts)
-                                })),
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .items_start()
+                                        // The ↑/↓ counts ride on the title line: that keeps
+                                        // the button as narrow as its subtitle.
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .min_w_0()
+                                                .gap_1p5()
+                                                .items_baseline()
+                                                .child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_sm()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .child(title),
+                                                )
+                                                .children(counts.map(|counts| {
+                                                    div()
+                                                        .flex_none()
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .child(counts)
+                                                })),
+                                        )
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_xs()
+                                                .text_color(muted)
+                                                .child(subtitle),
+                                        ),
+                                ),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| match kind {
                             SyncKind::Fetch => this.fetch(cx),
@@ -423,8 +575,9 @@ impl Workspace {
                 .when(on_github, |toolbar| {
                     toolbar.child(slot(
                         "toolbar-pulls-slot",
+                        PULLS_WIDTH,
                         border,
-                        big_button("toolbar-pulls")
+                        big_button("toolbar-pulls", PULLS_WIDTH)
                             .child(
                                 content("toolbar-pulls-content")
                                     .child(Icon::empty().path(ICON_PULL_REQUEST).size_5())
@@ -437,8 +590,136 @@ impl Workspace {
                             )
                             .on_click(cx.listener(|this, _, _, cx| this.open_pull_requests(cx))),
                     ))
+                })
+                // Right of Pull Requests: GitHub Actions, for repositories on GitHub.
+                .when(on_github, |toolbar| {
+                    toolbar.child(slot(
+                        "toolbar-workflows-slot",
+                        WORKFLOWS_WIDTH,
+                        border,
+                        big_button("toolbar-workflows", WORKFLOWS_WIDTH)
+                            .child(
+                                content("toolbar-workflows-content")
+                                    .child(Icon::empty().path(ICON_WORKFLOW).size_5())
+                                    .child(big_label(
+                                        tr!("repo.workflows.title"),
+                                        tr!("repo.workflows.button_hint"),
+                                        true,
+                                        muted,
+                                    )),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.open_workflows(cx))),
+                    ))
+                })
+                .child(div().flex_1())
+                .children(account_menu.map(|menu| {
+                    div()
+                        .debug_selector(|| "toolbar-account-slot".into())
+                        .flex_none()
+                        .w(px(ACCOUNT_WIDTH))
+                        .px_2()
+                        .child(menu)
+                })),
+        )
+    }
+}
+
+impl Workspace {
+    /// What used to sit under the sidebar's sync buttons: why the last branch or sync
+    /// action failed, and the "git-lfs isn't installed" warning. A strip under the toolbar,
+    /// only there when there is something to say.
+    pub fn render_repo_notice(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let repo = self.active_repo()?;
+        let error = repo.action_error.clone();
+        let lfs_missing = repo.lfs_status == Some(anano_core::git::LfsSync::NotInstalled);
+        if error.is_none() && !lfs_missing {
+            return None;
+        }
+        let theme = cx.theme();
+        let (danger, warning, border) = (theme.danger, theme.warning, theme.border);
+        Some(
+            v_flex()
+                .flex_none()
+                .w_full()
+                .border_b_1()
+                .border_color(border)
+                .children(error.map(|error| {
+                    h_flex()
+                        .px_3()
+                        .py_1p5()
+                        .gap_2()
+                        .items_center()
+                        .bg(danger.opacity(0.1))
+                        .child(div().flex_1().min_w_0().text_sm().text_color(danger).child(
+                            crate::ui::selectable(
+                                "notice-error",
+                                tr!("repo.sync.error", error = error),
+                            ),
+                        ))
+                        .child(
+                            crate::ui::button("notice-dismiss")
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Close)
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.dismiss_action_error(cx)),
+                                ),
+                        )
+                }))
+                .when(lfs_missing, |strip| {
+                    strip.child(
+                        div()
+                            .px_3()
+                            .py_1p5()
+                            .text_sm()
+                            .text_color(warning)
+                            .child(tr!("repo.sync.lfs_not_installed")),
+                    )
                 }),
         )
+    }
+
+    /// Deleting a branch throws away any commits only it has, so ask first.
+    pub fn confirm_delete_branch(
+        &mut self,
+        name: String,
+        window: &mut gpui_kit::Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui_kit::component::WindowExt as _;
+        self.close_branch_popover(cx);
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (workspace, name) = (workspace.clone(), name.clone());
+            dialog
+                .title(tr!("repo.branch.delete", name = name.clone()))
+                .w(px(420.))
+                .content(|content, _, _| {
+                    content.child(div().text_sm().child(tr!("repo.branch.delete_warning")))
+                })
+                .footer(
+                    gpui_kit::component::dialog::DialogFooter::new()
+                        .child(
+                            crate::ui::button("delete-branch-cancel")
+                                .outline()
+                                .label(tr!("common.cancel"))
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            crate::ui::button("delete-branch-confirm")
+                                .danger()
+                                .label(tr!("repo.branch.delete_action"))
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let name = name.clone();
+                                    workspace.update(cx, |ws, cx| ws.delete_branch(name, cx));
+                                }),
+                        ),
+                )
+        });
     }
 }
 
@@ -515,10 +796,13 @@ mod tests {
             bounds(cx, "toolbar-branch-content"),
             bounds(cx, "toolbar-sync-content"),
         );
-        assert_eq!(branch_slot.size, sync_slot.size);
+        // Each is as wide as it was asked to be, and both are the full toolbar height.
+        assert_eq!(branch_slot.size.width, px(BRANCH_WIDTH));
+        assert_eq!(sync_slot.size.width, px(SYNC_WIDTH));
+        assert_eq!(branch_slot.size.height, sync_slot.size.height);
         assert_eq!(
-            branch.size, sync.size,
-            "the two buttons' contents differ in size"
+            branch.size.height, sync.size.height,
+            "the two buttons' contents differ in height"
         );
         // Same inset from its slot on every side, i.e. each fills its slot the same way.
         assert_eq!(
@@ -761,5 +1045,131 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(ready(cx), "the repository switched to was never loaded");
+    }
+
+    /// A file row keeps its height however short the window gets: with more files than
+    /// fit, the list scrolls instead of squeezing its rows.
+    #[gpui_kit::test]
+    fn file_rows_keep_their_height_in_a_short_window(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::AppContext as _;
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::bridge::init(cx);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().canonicalize().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q", "-b", "main"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        for n in 0..40 {
+            std::fs::write(repo.join(format!("file-{n:02}.txt")), "x\n").unwrap();
+        }
+        let mut workspace = None;
+        let window = cx.add_window(|window, cx| {
+            let ws = cx.new(|cx| Workspace::new(window, cx));
+            workspace = Some(ws.clone());
+            gpui_kit::component::Root::new(ws, window, cx)
+        });
+        let workspace = workspace.unwrap();
+        let cx = &mut gpui_kit::VisualTestContext::from_window(window.into(), cx);
+        workspace.update(cx, |ws, cx| ws.open_repo_path(repo, cx));
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if workspace.read_with(cx, |ws, _| {
+                ws.active_repo().unwrap().changed_files().len() == 40
+            }) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let row_height = |cx: &mut gpui_kit::VisualTestContext| {
+            cx.run_until_parked();
+            cx.debug_bounds("first-file-row")
+                .expect("no file row drawn")
+                .size
+                .height
+        };
+        let tall = row_height(cx);
+        cx.simulate_resize(gpui_kit::size(px(1120.), px(420.)));
+        let short = row_height(cx);
+        assert_eq!(tall, px(36.));
+        assert_eq!(short, tall, "rows were squeezed when the window got short");
+    }
+
+    /// At the smallest window the app allows, every toolbar button is fully on screen,
+    /// the account button at the far right included.
+    #[gpui_kit::test]
+    fn at_the_minimum_window_size_the_whole_toolbar_fits(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::AppContext as _;
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::bridge::init(cx);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&repo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["remote", "add", "origin", "https://github.com/o/r.git"]);
+
+        let mut workspace = None;
+        let window = cx.add_window(|window, cx| {
+            let ws = cx.new(|cx| Workspace::new(window, cx));
+            workspace = Some(ws.clone());
+            gpui_kit::component::Root::new(ws, window, cx)
+        });
+        let workspace = workspace.unwrap();
+        let cx = &mut gpui_kit::VisualTestContext::from_window(window.into(), cx);
+        workspace.update(cx, |ws, cx| {
+            ws.accounts = vec![anano_core::external::Account {
+                login: "a-fairly-long-login".into(),
+                active: true,
+            }];
+            ws.open_repo_path(repo, cx);
+        });
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if workspace.read_with(cx, |ws, _| {
+                ws.active_repo().is_some_and(|r| r.origin.is_some())
+            }) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        cx.simulate_resize(gpui_kit::size(px(crate::MIN_WIDTH), px(crate::MIN_HEIGHT)));
+        cx.run_until_parked();
+
+        for slot in [
+            "toolbar-branch-slot",
+            "toolbar-sync-slot",
+            "toolbar-pulls-slot",
+            "toolbar-workflows-slot",
+            "toolbar-account-slot",
+        ] {
+            let bounds = cx
+                .debug_bounds(slot)
+                .unwrap_or_else(|| panic!("{slot} isn't on screen"));
+            assert!(
+                bounds.right() <= px(crate::MIN_WIDTH),
+                "{slot} runs off the window: right edge {:?} > {}",
+                bounds.right(),
+                crate::MIN_WIDTH
+            );
+        }
     }
 }

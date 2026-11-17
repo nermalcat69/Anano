@@ -14,17 +14,20 @@ pub mod status;
 
 pub use branch::{
     checkout_branch, create_branch, current_branch_name, delete_branch, head_branch, list_branches,
-    switch_branch,
+    rename_branch, switch_branch,
 };
 pub use clone::{
     author_name, clone_repo, init_repo, init_repo_with, last_fetched, origin_url, set_origin,
 };
-pub use diff::{DiffLine, DiffView, LineKind, diff_commit, diff_file};
+pub use diff::{
+    DiffLine, DiffView, LineKind, PatchFile, PatchStatus, diff_commit, diff_file,
+    diff_file_worktree, parse_patch,
+};
 pub use error::GitError;
 pub use lfs::{LfsOp, LfsSync, is_lfs_enabled, is_lfs_installed, is_lfs_pointer};
 pub use model::{Branch, ChangeKind, CommitInfo, FileStatus, RepoEntry};
 pub use remote::{fetch, pull, push};
 pub use repo::{
-    commit_staged, discard_change, discover_root, ignore_extension, ignore_path, recent_commits,
-    repo_status, stage_all, stage_path, unstage_path,
+    commit_paths, commit_staged, discard_change, discover_root, ignore_extension, ignore_path,
+    recent_commits, repo_status, stage_all, stage_path, unstage_path,
 };

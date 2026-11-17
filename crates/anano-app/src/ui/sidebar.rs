@@ -5,13 +5,14 @@
 //! 提交历史渲染——用户反馈这些都该在侧栏跟着仓库条目直接看到，主内容区腾出来给以后的
 //! diff 视图（这次不做）。
 
-use anano_core::git::{Branch, ChangeKind, FileStatus, LfsSync};
+use anano_core::git::ChangeKind;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, Sizable,
     button::ButtonVariants,
+    checkbox::Checkbox,
     h_flex,
-    input::Input,
-    menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
+    input::{Input, Textarea},
+    menu::{ContextMenuExt, PopupMenuItem},
     popover::Popover,
     tooltip::Tooltip,
     v_flex,
@@ -19,23 +20,10 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use anano_core::model::ThemePref;
-
-use crate::ToggleSidebar;
-use crate::assets::{ICON_FOLDER_GIT, ICON_HISTORY, logo_path};
+use crate::assets::{ICON_HISTORY, logo_path};
 use crate::brand::APP_NAME;
 use crate::i18n::tr;
-use crate::state::repos::SyncKind;
 use crate::state::workspace::{Selected, SidebarTab, Workspace};
-use crate::ui::text::theme_label;
-
-fn theme_icon(pref: ThemePref) -> IconName {
-    match pref {
-        ThemePref::System => IconName::Palette,
-        ThemePref::Light => IconName::Sun,
-        ThemePref::Dark => IconName::Moon,
-    }
-}
 
 fn kind_label(kind: ChangeKind) -> SharedString {
     match kind {
@@ -60,71 +48,6 @@ fn kind_color(kind: ChangeKind, cx: &App) -> Hsla {
 const RECENT_COUNT: usize = 3;
 
 impl Workspace {
-    /// 固定图标栏。
-    pub fn render_sidebar_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme();
-        v_flex()
-            .id("sidebar-rail")
-            .role(Role::Group)
-            .aria_label(tr!("sidebar.rail_aria"))
-            .w_12()
-            .h_full()
-            .flex_none()
-            .items_center()
-            .py_2()
-            .gap_1()
-            .bg(cx.theme().sidebar)
-            .border_r_1()
-            .border_color(cx.theme().sidebar_border)
-            .child(
-                div()
-                    .id("logo")
-                    .size_9()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(APP_NAME).build(window, cx)
-                    })
-                    .child(img(logo_path(cx)).size(px(26.)).flex_none()),
-            )
-            .child(div().h(px(1.)).w_6().my_1().bg(cx.theme().sidebar_border))
-            .when(self.sidebar_collapsed(), |rail| {
-                // 侧栏收起后，展开面板里的「收起」按钮跟着一起被藏起来了——之前没有
-                // 任何鼠标可点的地方能再展开它，只能靠不好发现的快捷键。这里补一个
-                // 常驻在窄栏里的「展开」按钮，跟收起按钮用同一个图标反过来（PanelLeftOpen）。
-                rail.child(
-                    crate::ui::button("rail-expand-sidebar")
-                        .ghost()
-                        .icon(Icon::new(IconName::PanelLeftOpen).size_4())
-                        .tooltip_with_action(tr!("sidebar.expand"), &ToggleSidebar, None)
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
-                )
-            })
-            .child(
-                crate::ui::button("rail-open-repo")
-                    .ghost()
-                    .icon(Icon::empty().path(ICON_FOLDER_GIT).size_4())
-                    .tooltip(tr!("repo.open"))
-                    .on_click(cx.listener(|this, _, window, cx| this.open_repo_dialog(window, cx))),
-            )
-            .child(div().flex_1())
-            .child(
-                crate::ui::button("rail-theme")
-                    .ghost()
-                    .icon(Icon::new(theme_icon(theme)).size_4())
-                    .tooltip(tr!("sidebar.theme_tooltip", theme = theme_label(theme)))
-                    .on_click(cx.listener(|this, _, window, cx| this.cycle_theme(window, cx))),
-            )
-            .child(
-                crate::ui::button("rail-settings")
-                    .ghost()
-                    .icon(Icon::new(IconName::Settings).size_4())
-                    .tooltip_with_action(tr!("sidebar.settings"), &crate::OpenSettings, None)
-                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
-            )
-    }
-
     /// 展开的功能面板：仓库切换器 + 分支/同步（常驻）+ Changes/History 标签。
     pub fn render_sidebar(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
@@ -136,27 +59,47 @@ impl Workspace {
             .bg(cx.theme().sidebar)
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
+            // Top: the logo and name, with Settings at the far end.
             .child(
                 h_flex()
-                    .h_8()
+                    .h_10()
                     .flex_none()
-                    .justify_end()
+                    .gap_2()
+                    .pl_3()
                     .pr_2()
                     .items_center()
+                    .child(img(logo_path(cx)).size(px(22.)).flex_none())
                     .child(
-                        crate::ui::button("collapse-sidebar")
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(APP_NAME),
+                    )
+                    .child(
+                        // Settings sits here now, where the collapse button was. The sidebar
+                        // still collapses with its shortcut, and the tab strip shows an
+                        // expand button while it is collapsed.
+                        crate::ui::button("sidebar-settings")
                             .ghost()
                             .xsmall()
-                            .icon(Icon::new(IconName::PanelLeftClose).size_4())
-                            .tooltip_with_action(tr!("sidebar.collapse"), &ToggleSidebar, None)
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+                            .icon(Icon::new(IconName::Settings).size_4())
+                            .tooltip_with_action(
+                                tr!("sidebar.settings"),
+                                &crate::OpenSettings,
+                                None,
+                            )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
+                            ),
                     ),
             )
             .child(self.render_repo_switcher(cx))
             .when(self.active_repo().is_some(), |d| {
-                d.child(self.render_branch_section(cx))
-                    .child(self.render_sync_toolbar(cx))
-                    .child(self.render_sidebar_tabs(cx))
+                // Branch and sync live in the toolbar above the tabs; the sidebar is just
+                // "which repository" and "what changed / what happened".
+                d.child(self.render_sidebar_tabs(cx))
             })
     }
 
@@ -193,6 +136,7 @@ impl Workspace {
         let search_input = self.repo_search_input.clone();
         let active_ix = self.active_index();
         let entries = self.switcher_entries();
+        let nermal = self.nermal_available;
         let hover_bg = cx.theme().list_hover;
         let active_bg = cx.theme().list_active;
         let radius = cx.theme().radius;
@@ -254,10 +198,12 @@ impl Workspace {
                         )| {
                             let ix = *ix;
                             let selected = ix == active_ix;
-                            let (open_ws, remove_ws) = (workspace.clone(), workspace.clone());
-                            let path = path.clone();
+                            let open_ws = workspace.clone();
+                            let menu_ws = workspace.clone();
+                            let (path, menu_path) = (path.clone(), path.clone());
                             h_flex()
                                 .id((section, ix))
+                                .flex_none()
                                 .gap_2()
                                 .items_center()
                                 .px_2()
@@ -273,6 +219,17 @@ impl Workspace {
                                 .on_click(move |_, _, cx| {
                                     open_ws.update(cx, |ws, cx| ws.activate_from_switcher(ix, cx));
                                 })
+                                // Remove / reveal / copy path live in the right-click menu.
+                                .context_menu(move |menu, _, _| {
+                                    crate::ui::tab_strip::repo_menu(
+                                        menu,
+                                        &menu_ws,
+                                        ix,
+                                        menu_path.clone(),
+                                        false,
+                                        nermal,
+                                    )
+                                })
                                 .child(
                                     Icon::empty()
                                         .path(crate::assets::ICON_BOOK)
@@ -286,18 +243,6 @@ impl Workspace {
                                         .text_sm()
                                         .truncate()
                                         .child(name.clone()),
-                                )
-                                .child(
-                                    crate::ui::button((section, ix + 1_000_000))
-                                        .ghost()
-                                        .xsmall()
-                                        .icon(IconName::Close)
-                                        .tooltip(tr!("repo.switcher.remove"))
-                                        .on_click(move |_, window, cx| {
-                                            cx.stop_propagation();
-                                            remove_ws
-                                                .update(cx, |ws, cx| ws.close_repo(ix, window, cx));
-                                        }),
                                 )
                                 .into_any_element()
                         };
@@ -380,228 +325,13 @@ impl Workspace {
         render_add_repo_actions(cx.entity()).into_any_element()
     }
 
-    /// 当前分支 + 切换 / 新建分支。放在改动列表上面：分支是「在哪改」，
-    /// 改动是「改了什么」，先后顺序跟着看仓库时的自然思路走。
-    fn render_branch_section(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(repo) = self.active_repo() else {
-            return div().into_any_element();
-        };
-        let current = repo.current_branch();
-        let branches: Vec<Branch> = repo
-            .branches
-            .iter()
-            .filter(|b| !b.is_remote)
-            .cloned()
-            .collect();
-        let branch_label = repo
-            .branch_label()
-            .map(SharedString::from)
-            .unwrap_or_else(|| tr!("repo.branch.detached"));
-        let ahead_behind = current.and_then(|b| b.ahead_behind);
-        let workspace = cx.entity();
-
-        v_flex()
-            .id("branch-section")
-            .flex_none()
-            .gap_1p5()
-            .px_2()
-            .py_2()
-            .border_t_1()
-            .border_color(cx.theme().sidebar_border)
-            .child(
-                h_flex()
-                    .gap_1p5()
-                    .items_center()
-                    .child(Icon::empty().path(crate::assets::ICON_GIT_BRANCH).size_4())
-                    .child(
-                        crate::ui::button("branch-switcher")
-                            .ghost()
-                            .xsmall()
-                            .flex_1()
-                            .label(branch_label.clone())
-                            .tooltip(tr!("repo.branch.switch", name = branch_label))
-                            .dropdown_menu(move |menu, _, _cx| {
-                                crate::ui::toolbar::branch_menu(menu, &branches, &workspace)
-                            }),
-                    )
-                    .when_some(ahead_behind, |d, (ahead, behind)| {
-                        d.child(
-                            div()
-                                .flex_none()
-                                .text_xs()
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .text_color(cx.theme().muted_foreground)
-                                .child(tr!(
-                                    "repo.branch.ahead_behind",
-                                    ahead = ahead.to_string(),
-                                    behind = behind.to_string()
-                                )),
-                        )
-                    })
-                    .child(
-                        crate::ui::button("new-branch")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Plus)
-                            .tooltip(tr!("repo.branch.new"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_new_branch_dialog(None, window, cx)
-                            })),
-                    ),
-            )
-            .when(self.new_branch_open, |d| {
-                d.child(self.render_new_branch_row(cx))
-            })
-            .into_any_element()
-    }
-
-    fn render_new_branch_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_name = !self.new_branch_input.read(cx).value().trim().is_empty();
-        h_flex()
-            .id("new-branch-row")
-            .gap_1p5()
-            .items_center()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        Input::new(&self.new_branch_input)
-                            .aria_label(tr!("repo.branch.new_placeholder")),
-                    ),
-            )
-            .child(
-                crate::ui::button("new-branch-create")
-                    .primary()
-                    .xsmall()
-                    .disabled(!has_name)
-                    .label(tr!("repo.branch.create"))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.submit_new_branch(window, cx)),
-                    ),
-            )
-            .child(
-                crate::ui::button("new-branch-cancel")
-                    .ghost()
-                    .xsmall()
-                    .label(tr!("repo.branch.cancel"))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_new_branch(cx))),
-            )
-    }
-
-    /// Fetch / Pull / Push：三个独立按钮，不并进提交框——commit 是本地操作，
-    /// 这三个是跟远程打交道，混在一起会让人搞不清「提交」到底有没有联网。
-    fn render_sync_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(repo) = self.active_repo() else {
-            return div().into_any_element();
-        };
-        let syncing = repo.syncing;
-        let action_error = repo.action_error.clone();
-        let lfs_status = repo.lfs_status;
-        // Which connected GitHub account this repository syncs as; only for GitHub remotes.
-        let logins = self.account_logins();
-        let github_origin = repo
-            .origin
-            .as_deref()
-            .filter(|url| !logins.is_empty() && anano_core::external::is_github(url));
-        let account_menu = github_origin.map(|url| {
-            let pinned = anano_core::external::account_of(url).map(str::to_string);
-            let workspace = cx.entity();
-            let label = pinned
-                .clone()
-                .map(SharedString::from)
-                .unwrap_or_else(|| tr!("repo.sync.account"));
-            crate::ui::button("sync-account")
-                .ghost()
-                .xsmall()
-                .icon(IconName::Github)
-                .label(label)
-                .tooltip(tr!("repo.sync.account_tooltip"))
-                .dropdown_menu(move |menu, _, _| {
-                    logins.iter().fold(menu, |menu, login| {
-                        let workspace = workspace.clone();
-                        let checked = pinned.as_deref() == Some(login.as_str());
-                        let login = login.clone();
-                        menu.item(PopupMenuItem::new(login.clone()).checked(checked).on_click(
-                            move |_, _, cx| {
-                                workspace
-                                    .update(cx, |ws, cx| ws.set_repo_account(login.clone(), cx));
-                            },
-                        ))
-                    })
-                })
-        });
-
-        v_flex()
-            .id("sync-toolbar")
-            .flex_none()
-            .gap_1()
-            .px_2()
-            .pb_2()
-            .child(
-                h_flex()
-                    .gap_1p5()
-                    .child(
-                        crate::ui::button("sync-fetch")
-                            .ghost()
-                            .xsmall()
-                            .icon(Icon::empty().path(crate::assets::ICON_DOWNLOAD))
-                            .label(tr!("repo.sync.fetch"))
-                            .loading(syncing == Some(SyncKind::Fetch))
-                            .disabled(syncing.is_some())
-                            .on_click(cx.listener(|this, _, _, cx| this.fetch(cx))),
-                    )
-                    .child(
-                        crate::ui::button("sync-pull")
-                            .ghost()
-                            .xsmall()
-                            .icon(Icon::empty().path(crate::assets::ICON_DOWNLOAD_CLOUD))
-                            .label(tr!("repo.sync.pull"))
-                            .loading(syncing == Some(SyncKind::Pull))
-                            .disabled(syncing.is_some())
-                            .on_click(cx.listener(|this, _, _, cx| this.pull(cx))),
-                    )
-                    .child(
-                        crate::ui::button("sync-push")
-                            .ghost()
-                            .xsmall()
-                            .icon(Icon::empty().path(crate::assets::ICON_UPLOAD_CLOUD))
-                            .label(tr!("repo.sync.push"))
-                            .loading(syncing == Some(SyncKind::Push))
-                            .disabled(syncing.is_some())
-                            .on_click(cx.listener(|this, _, _, cx| this.push(cx))),
-                    ),
-            )
-            .children(account_menu.map(|menu| h_flex().child(menu)))
-            .when_some(action_error, |d, err| {
-                d.child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().danger)
-                        .child(tr!("repo.sync.error", error = err)),
-                )
-            })
-            .when(lfs_status == Some(LfsSync::NotInstalled), |d| {
-                d.child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().warning)
-                        .child(tr!("repo.sync.lfs_not_installed")),
-                )
-            })
-            .into_any_element()
-    }
-
     /// Changes / History 两个标签的头 + 对应内容。
     fn render_sidebar_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(repo) = self.active_repo() else {
             return div().into_any_element();
         };
         let tab = self.sidebar_tab();
-        let changes_count = repo.statuses.len();
+        let changes_count = repo.changed_files().len();
         let changes_label = if changes_count > 0 {
             tr!(
                 "repo.tabs.changes_with_count",
@@ -711,6 +441,7 @@ impl Workspace {
                     .and_then(|o| anano_core::external::commit_web_url(o, &commit.id));
                 v_flex()
                     .id(SharedString::from(format!("commit-{}", commit.id)))
+                    .flex_none()
                     .px_3()
                     .py_2()
                     .gap_1()
@@ -783,85 +514,79 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// 当前激活仓库的改动：已 stage / 未 stage 两组，每行一个切换暂存的按钮 + 右键菜单。
+    /// The Changes tab's list, GitHub Desktop style: one row per changed file with a
+    /// checkbox (ticked = goes into the next commit; everything is ticked by default), the
+    /// path, and a symbol for what happened to it. The header checkbox ticks or unticks
+    /// them all. Clicking a row shows its diff; right-click for discard / ignore / copy.
     fn render_changes_section(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(repo) = self.active_repo() else {
             return div().into_any_element();
         };
         let muted = cx.theme().muted_foreground;
-        let staged: Vec<FileStatus> = repo.staged().cloned().collect();
-        let unstaged: Vec<FileStatus> = repo.unstaged().cloned().collect();
-        let clean =
-            staged.is_empty() && unstaged.is_empty() && !repo.loading && repo.error.is_none();
+        let border = cx.theme().sidebar_border;
+        let hover_bg = cx.theme().list_hover;
+        let active_bg = cx.theme().list_active;
+        let files = repo.changed_files();
+        let checked = files.len() - repo.unchecked.len().min(files.len());
+        let clean = files.is_empty() && !repo.loading && repo.error.is_none();
         // A repository whose folder was moved or deleted used to look like an empty one.
         let error = repo.error.clone().map(|error| {
             let path = repo.entry.path.display().to_string();
             v_flex()
+                .p_3()
                 .gap_1()
                 .text_sm()
                 .text_color(cx.theme().danger)
                 .child(tr!("repo.status.unreadable", path = path))
                 .child(div().text_xs().text_color(muted).child(error))
         });
-
-        v_flex()
-            .id("changes")
-            .flex_1()
-            .min_h_0()
-            .gap_3()
-            .px_2()
-            .py_2()
-            .overflow_y_scroll()
-            .children(error)
-            .child(self.render_file_list(tr!("repo.status.staged_title"), staged, true, cx))
-            .child(self.render_file_list(tr!("repo.status.unstaged_title"), unstaged, false, cx))
-            .when(clean, |d| {
-                d.child(
-                    div()
-                        .text_sm()
-                        .text_color(muted)
-                        .child(tr!("repo.status.clean")),
-                )
-            })
-            .into_any_element()
-    }
-
-    /// 一组文件（已 stage 或未 stage），每行带一个切换暂存状态的按钮 + 右键菜单
-    /// （Discard Changes / Ignore File / Ignore All *.ext / Copy Path / Copy Relative Path）。
-    fn render_file_list(
-        &self,
-        title: SharedString,
-        entries: Vec<FileStatus>,
-        staged: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        if entries.is_empty() {
-            return div().into_any_element();
-        }
         let workspace = cx.entity();
-        let hover_bg = cx.theme().list_hover;
-        let active_bg = cx.theme().list_active;
-        let radius = cx.theme().radius;
-        let rows: Vec<AnyElement> = entries
-            .into_iter()
+
+        let header = (!files.is_empty()).then(|| {
+            h_flex()
+                .flex_none()
+                .h_9()
+                .px_3()
+                .gap_2()
+                .items_center()
+                .border_b_1()
+                .border_color(border)
+                .child(
+                    Checkbox::new("changes-all")
+                        .checked(checked == files.len())
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_all_files(cx))),
+                )
+                .child(div().text_sm().child(tr!(
+                    "repo.status.changed_files",
+                    count = files.len().to_string()
+                )))
+        });
+
+        let rows: Vec<AnyElement> = files
+            .iter()
             .enumerate()
-            .map(|(ix, status)| {
-                let file = status.path.clone();
-                let kind = status.kind;
+            .map(|(ix, (file, kind))| {
+                let (file, kind) = (file.clone(), *kind);
                 let menu_workspace = workspace.clone();
                 let menu_file = file.clone();
-                let target = Selected::File {
-                    path: file.clone(),
-                    staged,
-                };
+                let toggle_file = file.clone();
+                let target = Selected::File { path: file.clone() };
                 let selected = self.selected() == Some(&target);
+                let ticked = !repo.unchecked.contains(&file);
                 h_flex()
-                    .id(("file-row", staged as usize * 10_000 + ix))
-                    .h_7()
-                    .px_1()
+                    .id(("file-row", ix))
+                    .when(ix == 0, |row| {
+                        row.debug_selector(|| "first-file-row".into())
+                    })
+                    // Fixed height: a row in a scrolling list must not be squeezed when
+                    // the window gets short (flex children shrink by default), it scrolls.
+                    .flex_none()
+                    .h_9()
+                    .px_3()
                     .gap_2()
                     .items_center()
-                    .rounded(radius)
+                    .border_b_1()
+                    .border_color(border)
                     .cursor_pointer()
                     .when(selected, |row| row.bg(active_bg))
                     .hover(move |style| style.bg(hover_bg))
@@ -939,13 +664,16 @@ impl Workspace {
                             )
                     })
                     .child(
+                        // Its own click target: ticking a file shouldn't also open it.
                         div()
-                            .w(px(72.))
+                            .id(("file-tick", ix))
                             .flex_none()
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(kind_color(status.kind, cx))
-                            .child(kind_label(status.kind)),
+                            .on_click(|_, _, cx| cx.stop_propagation())
+                            .child(Checkbox::new(("file-check", ix)).checked(ticked).on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.toggle_file(toggle_file.clone(), cx)
+                                }),
+                            )),
                     )
                     .child(
                         div()
@@ -953,83 +681,141 @@ impl Workspace {
                             .min_w_0()
                             .text_sm()
                             .truncate()
-                            .child(status.path.clone()),
+                            .child(file.clone()),
                     )
-                    .child(
-                        crate::ui::button(("toggle-stage", staged as usize * 10_000 + ix))
-                            .ghost()
-                            .xsmall()
-                            .icon(if staged {
-                                IconName::Minus
-                            } else {
-                                IconName::Plus
-                            })
-                            .tooltip(if staged {
-                                tr!("repo.status.unstage")
-                            } else {
-                                tr!("repo.status.stage")
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                // Don't also select the row: its side is about to change.
-                                cx.stop_propagation();
-                                this.toggle_stage(file.clone(), staged, cx)
-                            })),
-                    )
+                    .child(kind_badge(kind, cx))
                     .into_any_element()
             })
             .collect();
+
         v_flex()
-            .gap_1()
+            .id("changes")
+            .flex_1()
+            .min_h_0()
+            .children(error)
+            .children(header)
             .child(
-                div()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().muted_foreground)
-                    .child(title),
+                v_flex()
+                    .id("changes-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(rows)
+                    .when(clean, |d| {
+                        d.child(
+                            div()
+                                .p_3()
+                                .text_sm()
+                                .text_color(muted)
+                                .child(tr!("repo.status.clean")),
+                        )
+                    }),
             )
-            .children(rows)
             .into_any_element()
     }
 
-    /// 侧栏底部常驻的提交区：一行输入框 + 一个「提交」按钮。点「提交」时若索引里还
-    /// 没有任何暂存内容，先把当前显示的全部改动暂存一遍再提交（`bridge::commit`
-    /// 内部串联 stage-all → commit）；已经手动挑过 stage/unstage 的文件则原样尊重，
-    /// 不会被覆盖。设置里开了「提交后自动 push」时，`commit_active` 会在提交成功后
-    /// 自己接一次 push，这里不用管。
+    /// The commit area at the bottom of the Changes tab: your picture, a one-line summary
+    /// (required), an optional description, and "Commit N files to <branch>". The button is
+    /// live once there is a summary and at least one ticked file. With "Commit and push
+    /// with one button" on, it also pushes.
     fn render_commit_box(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_changes = self.active_repo().is_some_and(|r| !r.statuses.is_empty());
-        let has_message = !self.commit_input.read(cx).value().trim().is_empty();
+        let repo = self.active_repo();
+        let count = repo.map_or(0, |r| r.checked_files().len());
+        let has_summary = !self.commit_input.read(cx).value().trim().is_empty();
+        let border = cx.theme().border;
+        let radius = cx.theme().radius;
+        // Whoever this repository commits and pushes as.
+        let me = repo
+            .and_then(|r| r.origin.as_deref())
+            .and_then(|url| {
+                anano_core::external::accounts_for(url, &self.accounts)
+                    .into_iter()
+                    .next()
+            })
+            .or_else(|| self.accounts.iter().find(|a| a.active).cloned());
+        let avatar = me.map(|account| {
+            let picture = self
+                .account_avatars
+                .get(&account.login)
+                .and_then(|p| p.as_ref());
+            crate::ui::avatar(picture, &account.login, px(28.), cx)
+        });
+        // "Commit & Push", or plain "Commit" when there is no remote to push to.
+        let label = if repo.is_some_and(|r| r.origin.is_some()) {
+            tr!("repo.commit.commit_and_push")
+        } else {
+            tr!("repo.commit.commit")
+        };
         v_flex()
             .id("commit-box")
             .flex_none()
-            .gap_1p5()
-            .p_2()
+            .gap_2()
+            .p_3()
             .border_t_1()
             .border_color(cx.theme().sidebar_border)
             .child(
+                h_flex().gap_2().items_center().children(avatar).child(
+                    div()
+                        .id("commit-message")
+                        .flex_1()
+                        .min_w_0()
+                        .rounded(radius)
+                        .border_1()
+                        .border_color(border)
+                        .child(
+                            Input::new(&self.commit_input)
+                                .aria_label(tr!("repo.commit.placeholder")),
+                        ),
+                ),
+            )
+            .child(
                 div()
-                    .id("commit-message")
-                    .rounded(cx.theme().radius)
+                    .id("commit-description")
+                    .rounded(radius)
                     .border_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        Input::new(&self.commit_input).aria_label(tr!("repo.commit.placeholder")),
-                    ),
+                    .border_color(border)
+                    .child(Textarea::new(&self.commit_description)),
             )
             .child(
                 crate::ui::button("commit")
                     .primary()
-                    .small()
                     .w_full()
-                    .disabled(!has_changes || !has_message)
-                    .label(if crate::state::settings::settings(cx).push_on_commit {
-                        tr!("repo.commit.commit_and_push")
-                    } else {
-                        tr!("repo.commit.commit")
-                    })
+                    .disabled(count == 0 || !has_summary)
+                    .label(label)
                     .on_click(cx.listener(|this, _, window, cx| this.commit_active(window, cx))),
             )
     }
+}
+
+/// What happened to a file, as GitHub Desktop's little square: a dot for modified, plus
+/// for new, minus for deleted, arrow for renamed, bang for a conflict.
+fn kind_badge(kind: ChangeKind, cx: &App) -> impl IntoElement {
+    let glyph = match kind {
+        ChangeKind::Modified | ChangeKind::TypeChange => "•",
+        ChangeKind::New => "+",
+        ChangeKind::Deleted => "−",
+        ChangeKind::Renamed => "→",
+        ChangeKind::Conflicted => "!",
+    };
+    let color = kind_color(kind, cx);
+    let label = kind_label(kind);
+    div()
+        .id(SharedString::from(format!("kind-{glyph}")))
+        .flex_none()
+        .size_4()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(3.))
+        .border_1()
+        .border_color(color)
+        .text_color(color)
+        .text_xs()
+        .font_weight(FontWeight::BOLD)
+        .line_height(px(12.))
+        .child(glyph)
+        // The word is still there for anyone who hovers (and for screen readers).
+        .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
 }
 
 /// The three ways to add a repository, as plain buttons. They used to be a dropdown menu

@@ -318,36 +318,10 @@ impl ThemePref {
     }
 }
 
-/// 界面语言偏好：跟随系统，或固定英文 / 中文 / 日文。
+/// 更新源偏好：自动（GitHub Releases）、GitHub Releases（全球）、或阿里云 OSS 镜像（中国大陆）。
 ///
-/// 序列化值就是 BCP 47 语言标签（`"en"` / `"zh-CN"` / `"ja"`），`"system"` 表示跟随系统。
-/// 简体与繁体系统语言都落到 `zh-CN`（目前只有一套中文文案）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum LanguagePref {
-    #[default]
-    #[serde(rename = "system")]
-    System,
-    #[serde(rename = "en")]
-    English,
-    #[serde(rename = "zh-CN")]
-    Chinese,
-    #[serde(rename = "ja")]
-    Japanese,
-}
-
-impl LanguagePref {
-    pub const ALL: [LanguagePref; 4] = [
-        LanguagePref::System,
-        LanguagePref::English,
-        LanguagePref::Chinese,
-        LanguagePref::Japanese,
-    ];
-}
-
-/// 更新源偏好：自动（按界面语言挑）、GitHub Releases（全球）、或阿里云 OSS 镜像（中国大陆）。
-///
-/// 自动的解析规则在 app 层（`state/update.rs::resolve_source`）：界面语言是中文走大陆镜像，
-/// 其余一律走 GitHub。两个源的产物、校验和与 minisign 签名完全同源（CI 的 mirror 任务
+/// 解析规则在 app 层（`state/update.rs::resolve_source`）：自动与全球都走 GitHub，
+/// 只有显式选了镜像才走大陆镜像。两个源的产物、校验和与 minisign 签名完全同源（CI 的 mirror 任务
 /// 从 GitHub Release 原样搬运），安全性没有差别，差别只在链路快慢。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -459,10 +433,7 @@ pub struct AppSettings {
     /// 启动后自动向 GitHub Releases 查询一次新版本（只检查，不下载）。
     #[serde(default = "default_true")]
     pub check_updates_on_launch: bool,
-    /// 界面语言；旧版 settings.json 没有这个字段时按跟随系统处理。
-    #[serde(default)]
-    pub language: LanguagePref,
-    /// 更新源；旧版 settings.json 没有这个字段时按自动（跟随界面语言）处理。
+    /// 更新源；旧版 settings.json 没有这个字段时按自动处理。
     #[serde(default)]
     pub update_source: UpdateSourcePref,
     /// 请求体编辑器自动换行。**默认开**：请求体是自己写的，横向找不到行尾比多几行更烦。
@@ -472,10 +443,6 @@ pub struct AppSettings {
     /// 对齐才好扫；需要看长行时随时可以开。
     #[serde(default)]
     pub wrap_response_body: bool,
-    /// 提交成功后自动 push 到当前分支的远程上游。**默认关**：commit 是本地操作，
-    /// 悄悄联网推送不该是默认行为，得用户自己开。
-    #[serde(default)]
-    pub push_on_commit: bool,
 }
 
 pub const EDITOR_FONT_SIZE_RANGE: std::ops::RangeInclusive<u32> = 10..=24;
@@ -490,11 +457,9 @@ impl Default for AppSettings {
             request: RequestSettings::default(),
             editor_font_size: default_editor_font_size(),
             check_updates_on_launch: true,
-            language: LanguagePref::System,
             update_source: UpdateSourcePref::Auto,
             wrap_request_body: true,
             wrap_response_body: false,
-            push_on_commit: false,
         }
     }
 }
@@ -763,36 +728,15 @@ mod tests {
         assert_eq!(serde_json::to_string(&ThemePref::Dark).unwrap(), "\"dark\"");
     }
 
-    /// 语言偏好序列化成 BCP 47 标签；旧 settings.json 没有 language 字段时回落到跟随系统。
+    /// Settings files written before a field was removed (`language`, `push_on_commit`) still
+    /// load: unknown fields are ignored, and fields added later fall back to their defaults.
     #[test]
-    fn language_pref_serializes_as_language_tag_and_defaults_to_system() {
-        assert_eq!(
-            serde_json::to_string(&LanguagePref::Chinese).unwrap(),
-            "\"zh-CN\""
-        );
-        assert_eq!(
-            serde_json::to_string(&LanguagePref::English).unwrap(),
-            "\"en\""
-        );
-        assert_eq!(
-            serde_json::to_string(&LanguagePref::Japanese).unwrap(),
-            "\"ja\""
-        );
-        assert_eq!(
-            serde_json::from_str::<LanguagePref>("\"ja\"").unwrap(),
-            LanguagePref::Japanese
-        );
-        assert_eq!(
-            serde_json::from_str::<LanguagePref>("\"system\"").unwrap(),
-            LanguagePref::System
-        );
-        // 设置面板按 ALL 出下拉项：每个变体都要在里面，且没有重复
-        assert_eq!(LanguagePref::ALL.len(), 4);
-        assert!(LanguagePref::ALL.contains(&LanguagePref::Japanese));
-        let legacy: AppSettings =
-            serde_json::from_str(r#"{"editor_font_size":14,"check_updates_on_launch":false}"#)
-                .unwrap();
-        assert_eq!(legacy.language, LanguagePref::System);
+    fn legacy_settings_files_still_load() {
+        let legacy: AppSettings = serde_json::from_str(
+            r#"{"editor_font_size":14,"check_updates_on_launch":false,
+                "language":"ja","push_on_commit":true}"#,
+        )
+        .unwrap();
         assert_eq!(legacy.editor_font_size, 14);
         assert!(legacy.wrap_request_body);
         assert!(!legacy.wrap_response_body);

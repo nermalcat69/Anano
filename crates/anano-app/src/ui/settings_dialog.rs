@@ -3,7 +3,7 @@
 //! 设置值的读写都走 [`crate::state::settings`]（请求段改了重建 HTTP client、字号直接套到主题），
 //! 主题偏好仍记在 [`Workspace`]（它属于布局状态，写进 `workspace.json`）。
 
-use anano_core::model::{EDITOR_FONT_SIZE_RANGE, LanguagePref, ThemePref, UpdateSourcePref};
+use anano_core::model::{EDITOR_FONT_SIZE_RANGE, ThemePref, UpdateSourcePref};
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt,
     button::{Button, ButtonVariants},
@@ -32,7 +32,7 @@ use crate::state::settings;
 use crate::state::store::store;
 use crate::state::update::{self, InstallKind};
 use crate::state::workspace::{LoginState, Workspace};
-use crate::ui::text::{language_label, theme_label, update_source_label};
+use crate::ui::text::{theme_label, update_source_label};
 
 // 对话框尺寸按像素定：Dialog 的 `w()` 只收 Pixels，内容高度要和它配套，
 // 这是设计指南允许的「与外部表面匹配的几何」例外。
@@ -181,28 +181,6 @@ fn general_page(workspace: WeakEntity<Workspace>) -> SettingPage {
                 )
                 .item(
                     SettingItem::new(
-                        tr!("settings.language"),
-                        SettingField::dropdown(
-                            LanguagePref::ALL
-                                .iter()
-                                .map(|p| (language_key(*p), language_label(*p)))
-                                .collect(),
-                            |cx| language_key(settings::settings(cx).language),
-                            |value, cx| {
-                                let pref = LanguagePref::ALL
-                                    .iter()
-                                    .copied()
-                                    .find(|p| language_key(*p) == value)
-                                    .unwrap_or_default();
-                                settings::update(cx, |s| s.language = pref);
-                            },
-                        )
-                        .default_value(language_key(LanguagePref::System)),
-                    )
-                    .description(tr!("settings.language_desc")),
-                )
-                .item(
-                    SettingItem::new(
                         tr!("settings.editor_font_size"),
                         SettingField::number_input(
                             NumberFieldOptions {
@@ -219,19 +197,6 @@ fn general_page(workspace: WeakEntity<Workspace>) -> SettingPage {
                     )
                     .description(tr!("settings.editor_font_size_desc")),
                 ),
-        )
-        .group(
-            SettingGroup::new().title(tr!("settings.git")).item(
-                SettingItem::new(
-                    tr!("settings.push_on_commit"),
-                    SettingField::switch(
-                        |cx| settings::settings(cx).push_on_commit,
-                        |value, cx| settings::update(cx, |s| s.push_on_commit = value),
-                    )
-                    .default_value(false),
-                )
-                .description(tr!("settings.push_on_commit_desc")),
-            ),
         );
     #[cfg(target_os = "linux")]
     let page = page.group(linux_system_group());
@@ -715,15 +680,6 @@ fn releases_button(id: &'static str) -> Link {
             .child(tr!("settings.releases"))
             .child(Icon::new(IconName::ExternalLink).size_3p5()),
     )
-}
-
-fn language_key(pref: LanguagePref) -> SharedString {
-    match pref {
-        LanguagePref::System => "system".into(),
-        LanguagePref::English => "en".into(),
-        LanguagePref::Chinese => "zh-CN".into(),
-        LanguagePref::Japanese => "ja".into(),
-    }
 }
 
 fn update_source_key(pref: UpdateSourcePref) -> SharedString {

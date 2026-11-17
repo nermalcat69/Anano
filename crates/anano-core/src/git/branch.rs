@@ -168,6 +168,17 @@ pub fn switch_branch(repo_path: &Path, name: &str, leave_changes: bool) -> Resul
     Ok(())
 }
 
+/// Rename a local branch (`git branch -m old new`): its upstream setting follows it, and
+/// `HEAD` follows too when it is the checked-out one. Refuses a name that is taken.
+pub fn rename_branch(repo_path: &Path, old: &str, new: &str) -> Result<(), GitError> {
+    let repo = open(repo_path)?;
+    let mut branch = repo
+        .find_branch(old, BranchType::Local)
+        .map_err(GitError::Branch)?;
+    branch.rename(new, false).map_err(GitError::Branch)?;
+    Ok(())
+}
+
 /// 删除一个本地分支。删除当前签出的分支时 libgit2 本身就会拒绝
 /// （`Cannot delete branch '<name>' checked out at ...`），这里不需要重复判断。
 pub fn delete_branch(repo_path: &Path, name: &str) -> Result<(), GitError> {
@@ -349,5 +360,49 @@ mod tests {
 
         git(&["checkout", "-q", "--detach"]);
         assert_eq!(head_branch(p), None);
+    }
+
+    #[test]
+    fn renaming_a_branch_moves_head_and_refuses_a_taken_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(p)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "a@b.c"]);
+        git(&["config", "user.name", "test"]);
+        std::fs::write(p.join("a.txt"), "one\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        create_branch(p, "side", None).unwrap();
+
+        // The checked-out branch: HEAD follows the new name.
+        rename_branch(p, "main", "trunk").unwrap();
+        assert_eq!(current_branch_name(p).unwrap().as_deref(), Some("trunk"));
+        let names: Vec<_> = list_branches(p)
+            .unwrap()
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        assert!(names.contains(&"trunk".to_string()) && !names.contains(&"main".to_string()));
+
+        // A name that exists is refused and nothing changes.
+        assert!(rename_branch(p, "side", "trunk").is_err());
+        assert!(rename_branch(p, "side", "").is_err());
+        assert!(rename_branch(p, "nope", "other").is_err());
+        let names: Vec<_> = list_branches(p)
+            .unwrap()
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        assert!(names.contains(&"side".to_string()));
     }
 }

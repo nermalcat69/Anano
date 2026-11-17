@@ -35,17 +35,20 @@ pub(crate) fn auth_callbacks() -> RemoteCallbacks<'static> {
         if allowed.contains(CredentialType::USER_PASS_PLAINTEXT)
             && crate::external::is_github_https(url)
         {
+            // Which account: the one the URL is pinned to, else the repository's owner if
+            // that account is connected, else the terminal's default, then the rest (see
+            // `external::accounts_for`). Each rejection brings us back for the next one.
+            // This is also what makes a plain `https://github.com/...` remote work at all
+            // when git has no credential helper libgit2 can see.
+            // (The pin is read from `username_from_url`: libgit2 may hand us `url` with the
+            // user part already stripped.)
             if let Some(login) = username_from_url {
                 if let Some(token) = crate::external::token(login) {
                     return Cred::userpass_plaintext(login, &token);
                 }
             } else {
-                // Not pinned to an account: offer the connected ones in turn, the terminal's
-                // default first (each rejection brings us back here for the next). This is
-                // what makes a plain `https://github.com/...` remote work at all when git
-                // has no credential helper libgit2 can see.
-                let mut accounts = crate::external::list_accounts();
-                accounts.sort_by_key(|a| !a.active);
+                let accounts =
+                    crate::external::accounts_for(url, &crate::external::list_accounts());
                 if let Some(account) = accounts.get(attempts - 1)
                     && let Some(token) = crate::external::token(&account.login)
                 {

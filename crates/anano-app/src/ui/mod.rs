@@ -1,11 +1,15 @@
+pub mod account_view;
+pub mod no_changes;
 pub mod pull_requests;
 pub mod repo_dialogs;
+pub mod review_dialog;
 pub mod settings_dialog;
 pub mod sidebar;
 pub mod status_pane;
 pub mod tab_strip;
 pub mod text;
 pub mod toolbar;
+pub mod workflows;
 
 /// Every button in the app is built through here so they all show the pointing-hand
 /// cursor (the component's own default is the arrow).
@@ -80,6 +84,17 @@ fn long_ago(secs: u64) -> gpui_kit::SharedString {
         }
     }
     crate::i18n::tr!("time.just_now")
+}
+
+/// Text you can select with the mouse (drag, double-click a word) and copy (⌘C / Ctrl C).
+/// Selection works across every such text in the window, like a web page. Plain `div`
+/// text is not selectable in gpui, so everything worth copying (diffs, logs, titles,
+/// messages) goes through here. `id` must be stable and unique among siblings.
+pub fn selectable(
+    id: impl Into<gpui_kit::ElementId>,
+    text: impl Into<gpui_kit::SharedString>,
+) -> gpui_kit::base::SelectableText {
+    gpui_kit::base::SelectableText::new(id, text)
 }
 
 #[cfg(test)]

@@ -22,7 +22,7 @@ pub const APP_NAME: &str = "Anano";
 pub const APP_ID: &str = "top.catonthe.anano";
 
 /// 「关于」页的作者署名。只在应用内渲染（gpui 全程 UTF-8），不要送进 Windows 资源。
-pub const AUTHOR: &str = "虚拟世界的懒猫 (@finch-xu)";
+pub const AUTHOR: &str = "Arjun Aditya";
 
 /// 发布者，用于 Windows exe 的 VERSIONINFO 与 MSI 的「发布者」栏。只被 `build.rs` 读。
 ///
@@ -35,4 +35,4 @@ pub const PUBLISHER: &str = "finch-xu";
 pub const REPO_URL: &str = "https://github.com/finch-xu/Anano";
 
 /// 开源协议，与仓库根的 `LICENSE` 一致。
-pub const LICENSE: &str = "Apache-2.0";
+pub const LICENSE: &str = "MIT";

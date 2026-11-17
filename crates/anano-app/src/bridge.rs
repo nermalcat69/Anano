@@ -7,9 +7,8 @@ use anano_core::external::{self, Account, PendingLogin, Repo, Templates};
 use anano_core::git::lfs::sync as lfs_sync;
 use anano_core::git::{
     Branch, ChangeKind, CommitInfo, DiffView, FileStatus, GitError, LfsOp, LfsSync, clone_repo,
-    commit_staged, create_branch, delete_branch, discard_change, discover_root, fetch,
-    ignore_extension, ignore_path, list_branches, pull, push, recent_commits, repo_status,
-    stage_all, stage_path, unstage_path,
+    create_branch, delete_branch, discard_change, discover_root, fetch, ignore_extension,
+    ignore_path, list_branches, pull, push, recent_commits, repo_status,
 };
 use gpui_kit::{App, Task};
 use gpui_tokio::Tokio;
@@ -47,40 +46,35 @@ pub fn refresh_log(
     })
 }
 
-/// 暂存 / 取消暂存一个文件。
-pub fn stage(
+/// Commit exactly the ticked files (`include`), leaving the unticked ones (`exclude`) out.
+pub fn commit_selected(
     cx: &App,
     repo: PathBuf,
-    file: String,
-    staged: bool,
-) -> Task<anyhow::Result<Result<(), GitError>>> {
+    message: String,
+    include: Vec<String>,
+    exclude: Vec<String>,
+) -> Task<anyhow::Result<Result<String, GitError>>> {
     Tokio::spawn_result(cx, async move {
         Ok(tokio::task::spawn_blocking(move || {
-            if staged {
-                unstage_path(&repo, &file)
-            } else {
-                stage_path(&repo, &file)
-            }
+            anano_core::git::commit_paths(&repo, &message, &include, &exclude)
         })
         .await?)
     })
 }
 
-/// `git add -A`。
-pub fn stage_all_changes(cx: &App, repo: PathBuf) -> Task<anyhow::Result<Result<(), GitError>>> {
+/// Profile pictures of the connected accounts themselves, by login (cached on disk).
+pub fn account_avatars(cx: &App, logins: Vec<String>) -> Task<anyhow::Result<Vec<Avatar>>> {
     Tokio::spawn_result(cx, async move {
-        Ok(tokio::task::spawn_blocking(move || stage_all(&repo)).await?)
-    })
-}
-
-/// 把当前索引提交为一个新 commit。
-pub fn commit(
-    cx: &App,
-    repo: PathBuf,
-    message: String,
-) -> Task<anyhow::Result<Result<String, GitError>>> {
-    Tokio::spawn_result(cx, async move {
-        Ok(tokio::task::spawn_blocking(move || commit_staged(&repo, &message)).await?)
+        Ok(tokio::task::spawn_blocking(move || {
+            logins
+                .into_iter()
+                .map(|login| {
+                    let path = external::account_avatar(&login);
+                    (login, path)
+                })
+                .collect()
+        })
+        .await?)
     })
 }
 
@@ -387,7 +381,7 @@ pub fn diff(
     use crate::state::workspace::Selected;
     Tokio::spawn_result(cx, async move {
         Ok(tokio::task::spawn_blocking(move || match selected {
-            Selected::File { path, staged } => anano_core::git::diff_file(&repo, &path, staged),
+            Selected::File { path } => anano_core::git::diff_file_worktree(&repo, &path),
             Selected::Commit(id) => anano_core::git::diff_commit(&repo, &id),
         })
         .await?)
@@ -435,10 +429,84 @@ pub fn set_origin_account(
     })
 }
 
-/// The repository's pull requests (all states, newest first).
-pub fn pull_requests(cx: &App, origin: String) -> Task<anyhow::Result<Vec<external::PullRequest>>> {
+/// A pull request list and how many pull requests match in all (more than the list holds
+/// until every page is loaded).
+pub type PullList = (Vec<external::PullRequest>, usize);
+
+/// The plain list for a state as last saved to disk (instant; may be stale).
+pub fn cached_pull_requests(
+    cx: &App,
+    origin: String,
+    state: external::PullState,
+) -> Task<anyhow::Result<Option<PullList>>> {
     Tokio::spawn_result(cx, async move {
-        tokio::task::spawn_blocking(move || external::list_pull_requests(&origin))
+        Ok(
+            tokio::task::spawn_blocking(move || external::cached_pull_requests(&origin, state))
+                .await?,
+        )
+    })
+}
+
+/// Re-read the first `pages` pages of a search from GitHub (and cache them if plain).
+pub fn refresh_pull_requests(
+    cx: &App,
+    origin: String,
+    search: external::PullSearch,
+    pages: usize,
+) -> Task<anyhow::Result<PullList>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || {
+            external::refresh_pull_requests(&origin, &search, pages)
+        })
+        .await?
+        .map_err(anyhow::Error::msg)
+    })
+}
+
+/// Load the next page of a search and add it to `current` (and to the cache if plain).
+pub fn more_pull_requests(
+    cx: &App,
+    origin: String,
+    search: external::PullSearch,
+    page: usize,
+    current: Vec<external::PullRequest>,
+) -> Task<anyhow::Result<PullList>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || {
+            external::more_pull_requests(&origin, &search, page, current)
+        })
+        .await?
+        .map_err(anyhow::Error::msg)
+    })
+}
+
+/// Open / merged / closed totals for an author and text.
+pub fn pull_counts(
+    cx: &App,
+    origin: String,
+    author: Option<String>,
+    text: String,
+) -> Task<anyhow::Result<external::PullCounts>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || {
+            external::pull_counts(&origin, author.as_deref(), &text)
+        })
+        .await?
+        .map_err(anyhow::Error::msg)
+    })
+}
+
+/// The people the author filter offers (saved list, instantly; may be stale).
+pub fn cached_pull_authors(cx: &App, origin: String) -> Task<anyhow::Result<Option<Vec<String>>>> {
+    Tokio::spawn_result(cx, async move {
+        Ok(tokio::task::spawn_blocking(move || external::cached_pull_authors(&origin)).await?)
+    })
+}
+
+/// The people the author filter offers, fresh from GitHub (and saved).
+pub fn pull_authors(cx: &App, origin: String) -> Task<anyhow::Result<Vec<String>>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || external::pull_authors(&origin))
             .await?
             .map_err(anyhow::Error::msg)
     })
@@ -461,6 +529,171 @@ pub fn pull_request(
 pub fn merge_pull_request(cx: &App, origin: String, number: u64) -> Task<anyhow::Result<()>> {
     Tokio::spawn_result(cx, async move {
         tokio::task::spawn_blocking(move || external::merge_pull_request(&origin, number))
+            .await?
+            .map_err(anyhow::Error::msg)
+    })
+}
+
+/// Every file a pull request changes, with its lines numbered on both sides.
+pub fn pull_request_files(
+    cx: &App,
+    origin: String,
+    number: u64,
+) -> Task<anyhow::Result<Vec<anano_core::git::PatchFile>>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || external::pull_request_files(&origin, number))
+            .await?
+            .map_err(anyhow::Error::msg)
+    })
+}
+
+/// Submit a review (comment / approval / request for changes) of a pull request.
+pub fn submit_review(
+    cx: &App,
+    origin: String,
+    number: u64,
+    verdict: external::ReviewVerdict,
+    body: String,
+) -> Task<anyhow::Result<()>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || {
+            external::submit_review(&origin, number, verdict, &body)
+        })
+        .await?
+        .map_err(anyhow::Error::msg)
+    })
+}
+
+/// Rename a local branch.
+pub fn rename_branch(
+    cx: &App,
+    repo: PathBuf,
+    old: String,
+    new: String,
+) -> Task<anyhow::Result<Result<(), GitError>>> {
+    Tokio::spawn_result(cx, async move {
+        Ok(
+            tokio::task::spawn_blocking(move || anano_core::git::rename_branch(&repo, &old, &new))
+                .await?,
+        )
+    })
+}
+
+/// Every workflow of the repository.
+pub fn list_workflows(
+    cx: &App,
+    origin: String,
+) -> Task<anyhow::Result<Vec<anano_core::workflows::Workflow>>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || anano_core::workflows::list_workflows(&origin))
+            .await?
+            .map_err(anyhow::Error::msg)
+    })
+}
+
+/// One page of workflow runs, and how many there are in all.
+pub fn list_runs(
+    cx: &App,
+    origin: String,
+    workflow: Option<u64>,
+    status: anano_core::workflows::RunStatus,
+    page: usize,
+) -> Task<anyhow::Result<(Vec<anano_core::workflows::WorkflowRun>, usize)>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || {
+            anano_core::workflows::list_runs(&origin, workflow, status, page)
+                .map(|page| (page.items, page.total))
+        })
+        .await?
+        .map_err(anyhow::Error::msg)
+    })
+}
+
+/// The jobs of a run, with their steps.
+pub fn run_jobs(
+    cx: &App,
+    origin: String,
+    run: u64,
+) -> Task<anyhow::Result<Vec<anano_core::workflows::RunJob>>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || anano_core::workflows::run_jobs(&origin, run))
+            .await?
+            .map_err(anyhow::Error::msg)
+    })
+}
+
+/// One job's log, parsed into classified lines.
+pub fn job_log(
+    cx: &App,
+    origin: String,
+    job: u64,
+) -> Task<anyhow::Result<Vec<anano_core::workflows::LogLine>>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || anano_core::workflows::job_log(&origin, job))
+            .await?
+            .map_err(anyhow::Error::msg)
+    })
+}
+
+/// One page of the repositories an account owns.
+pub fn account_repos_page(
+    cx: &App,
+    login: String,
+    page: usize,
+) -> Task<anyhow::Result<Vec<anano_core::browse::RemoteRepo>>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || anano_core::browse::account_repos(&login, page))
+            .await?
+            .map_err(anyhow::Error::msg)
+    })
+}
+
+/// The organizations an account belongs to.
+pub fn account_orgs(cx: &App, login: String) -> Task<anyhow::Result<Vec<anano_core::browse::Org>>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || anano_core::browse::orgs(&login))
+            .await?
+            .map_err(anyhow::Error::msg)
+    })
+}
+
+/// One page of an organization's repositories, as `login` sees them.
+pub fn org_repos_page(
+    cx: &App,
+    login: String,
+    org: String,
+    page: usize,
+) -> Task<anyhow::Result<Vec<anano_core::browse::RemoteRepo>>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || anano_core::browse::org_repos(&login, &org, page))
+            .await?
+            .map_err(anyhow::Error::msg)
+    })
+}
+
+/// One page of a repository's commit history.
+pub fn commits_page(
+    cx: &App,
+    login: String,
+    slug: String,
+    page: usize,
+) -> Task<anyhow::Result<Vec<anano_core::browse::RemoteCommit>>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || anano_core::browse::commits(&login, &slug, page))
+            .await?
+            .map_err(anyhow::Error::msg)
+    })
+}
+
+/// What one commit of a repository changed.
+pub fn remote_commit_files(
+    cx: &App,
+    login: String,
+    slug: String,
+    sha: String,
+) -> Task<anyhow::Result<Vec<anano_core::git::PatchFile>>> {
+    Tokio::spawn_result(cx, async move {
+        tokio::task::spawn_blocking(move || anano_core::browse::commit_files(&login, &slug, &sha))
             .await?
             .map_err(anyhow::Error::msg)
     })
