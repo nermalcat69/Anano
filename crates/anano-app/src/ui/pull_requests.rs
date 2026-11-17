@@ -1221,6 +1221,32 @@ impl Workspace {
                             .text_sm()
                             .child(crate::ui::selectable("pull-verdict", verdict)),
                     )
+                    // A pull request of the open repository that conflicts with its base:
+                    // Claude Code can check it out and resolve the conflicts.
+                    .when(
+                        pr.summary.state == "OPEN"
+                            && pulls.remote.is_none()
+                            && (pr.mergeable == "CONFLICTING" || pr.merge_state == "DIRTY"),
+                        |merge_box| {
+                            let (head, base) = (pr.summary.head.clone(), pr.summary.base.clone());
+                            merge_box.child(
+                                h_flex().child(
+                                    crate::ui::button("pull-fix-conflicts")
+                                        .outline()
+                                        .label(tr!("repo.claude.fix_pr_button"))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.fix_pull_request_conflicts(
+                                                number,
+                                                head.clone(),
+                                                base.clone(),
+                                                window,
+                                                cx,
+                                            )
+                                        })),
+                                ),
+                            )
+                        },
+                    )
                     .children(pulls.merge_error.clone().map(|err| {
                         div()
                             .text_sm()

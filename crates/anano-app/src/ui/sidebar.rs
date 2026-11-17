@@ -562,6 +562,41 @@ impl Workspace {
                 )))
         });
 
+        // Conflicts (a merge or rebase stopped): say so, and offer the fix.
+        let conflicted = files
+            .iter()
+            .filter(|(_, kind)| *kind == ChangeKind::Conflicted)
+            .count();
+        let danger = cx.theme().danger;
+        let banner = (conflicted > 0).then(|| {
+            h_flex()
+                .flex_none()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .items_center()
+                .border_b_1()
+                .border_color(border)
+                .bg(danger.opacity(0.1))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .text_color(danger)
+                        .child(tr!("repo.claude.banner", count = conflicted.to_string())),
+                )
+                .child(
+                    crate::ui::button("fix-conflicts-claude")
+                        .primary()
+                        .xsmall()
+                        .label(tr!("repo.claude.fix_button"))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.fix_conflicts_in_tree(window, cx)
+                        })),
+                )
+        });
+
         let rows: Vec<AnyElement> = files
             .iter()
             .enumerate()
@@ -693,6 +728,7 @@ impl Workspace {
             .flex_1()
             .min_h_0()
             .children(error)
+            .children(banner)
             .children(header)
             .child(
                 v_flex()

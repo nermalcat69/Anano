@@ -806,6 +806,12 @@ repo:
       en: Push
     error:
       en: "Sync failed: %{error}"
+    denied:
+      en: "The selected account can't access %{repo}. Your changes are safe. Try another connected account:"
+    denied_none:
+      en: "None of your connected accounts can access %{repo}. Your changes are safe. Connect an account that has access (account menu, top right)."
+    try_as:
+      en: "Retry as %{login}"
     lfs_not_installed:
       en: Repository uses Git LFS, but git-lfs isn't installed — LFS objects weren't synced
   main_placeholder:
@@ -1129,6 +1135,41 @@ repo:
       en: Select a commit to see what it changed
     loading_changes:
       en: Loading the changes…
+  claude:
+    banner:
+      en: "%{count} file(s) have merge conflicts"
+    fix_button:
+      en: Fix with Claude Code
+    fix_pr_button:
+      en: Fix conflicts with Claude Code
+    branch_menu:
+      en: Merge main and fix conflicts with Claude Code…
+    title_tree:
+      en: Fix merge conflicts with Claude Code
+    title_branch:
+      en: "Update %{branch} and fix conflicts with Claude Code"
+    title_pr:
+      en: "Fix conflicts of pull request #%{number} with Claude Code"
+    where:
+      en: "Runs in %{path}"
+    warning:
+      en: Claude Code will edit files in this repository and run git commands there. It is told not to push. It can't ask questions while it works, and you can stop it at any time.
+    not_installed:
+      en: Claude Code isn't installed (the claude command was not found).
+    prompt_placeholder:
+      en: What should Claude Code do?
+    run:
+      en: Run Claude Code
+    stop:
+      en: Stop
+    close:
+      en: Close
+    working:
+      en: Working…
+    done:
+      en: "Finished in %{seconds}s"
+    failed:
+      en: Claude Code didn't finish
   tab_menu:
     close:
       en: Close Tab

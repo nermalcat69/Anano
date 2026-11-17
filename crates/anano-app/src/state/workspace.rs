@@ -85,6 +85,10 @@ pub enum Selected {
 }
 
 pub struct Workspace {
+    /// The Claude Code run (or the prompt waiting to be run) behind the dialog.
+    pub(crate) claude: Option<crate::ui::claude_dialog::ClaudeSession>,
+    pub(crate) claude_input: Entity<TextareaState>,
+    pub(crate) claude_scroll: ScrollHandle,
     /// The account view (repositories, organizations, commit history of an account's
     /// repositories), when it is what the main pane shows.
     pub(crate) account: Option<crate::ui::account_view::AccountState>,
@@ -192,7 +196,15 @@ impl Workspace {
         let account_search_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder(tr!("repo.account.filter_placeholder"))
         });
+        let claude_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(5, 12)
+                .placeholder(tr!("repo.claude.prompt_placeholder"))
+        });
         let mut ws = Self {
+            claude: None,
+            claude_input: claude_input.clone(),
+            claude_scroll: ScrollHandle::new(),
             account: None,
             account_search_input: account_search_input.clone(),
             commit_scroll: UniformListScrollHandle::new(),
@@ -295,6 +307,13 @@ impl Workspace {
                 if matches!(event, gpui_kit::component::input::InputEvent::Change) {
                     cx.notify();
                 }
+            },
+        ));
+        ws._subs.push(cx.subscribe_in(
+            &claude_input,
+            window,
+            |this, _, event: &gpui_kit::component::input::InputEvent, _, cx| {
+                this.on_claude_input_event(event, cx)
             },
         ));
         ws._subs.push(cx.subscribe_in(

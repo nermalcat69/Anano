@@ -126,6 +126,12 @@ impl ClaudeHandle {
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
         if let Ok(mut child) = self.child.lock() {
+            // Its own process group (see `spawn`): kill what Claude Code started too, or a
+            // grandchild keeps the output pipe open and the run never reports as stopped.
+            #[cfg(unix)]
+            let _ = Command::new("kill")
+                .args(["-KILL", &format!("-{}", child.id())])
+                .status();
             let _ = child.kill();
         }
     }
@@ -142,7 +148,10 @@ pub fn spawn(
     on_line: impl Fn(ClaudeLine) + Send + 'static,
 ) -> Result<ClaudeHandle, String> {
     let claude = find_claude().ok_or("Claude Code (the `claude` command) isn't installed")?;
-    let mut child = Command::new(claude)
+    let mut command = Command::new(claude);
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command
         .current_dir(dir)
         .arg("-p")
         .arg(prompt)

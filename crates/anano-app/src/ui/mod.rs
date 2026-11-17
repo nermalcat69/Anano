@@ -1,4 +1,5 @@
 pub mod account_view;
+pub mod claude_dialog;
 pub mod no_changes;
 pub mod pull_requests;
 pub mod repo_dialogs;

@@ -141,10 +141,20 @@ fn branch_panel(
                         })
                     };
                     let copy_name = menu_name.clone();
+                    let menu_name_for_claude = menu_name.clone();
                     let menu = menu.item(item(
                         tr!("repo.branch.rename_menu"),
                         |ws, name, window, cx| ws.open_rename_branch_dialog(name, window, cx),
                     ));
+                    // Not for main / master themselves: there is nothing to merge into them.
+                    let menu = if matches!(menu_name_for_claude.as_str(), "main" | "master") {
+                        menu
+                    } else {
+                        menu.item(item(
+                            tr!("repo.claude.branch_menu"),
+                            |ws, name, window, cx| ws.merge_default_with_claude(name, window, cx),
+                        ))
+                    };
                     let menu = if is_head {
                         menu
                     } else {
@@ -635,8 +645,37 @@ impl Workspace {
         if error.is_none() && !lfs_missing {
             return None;
         }
+        // The server refused every account we offered (HTTP 401/403): say which repository,
+        // and let any connected account be tried with one click. Nothing is lost: the
+        // commits are still here, only the push/fetch didn't go through.
+        let denied = error.as_deref().is_some_and(|e| {
+            e.contains("http status code: 403")
+                || e.contains("http status code: 401")
+                || e.contains("rejected the credentials")
+        });
+        let slug = repo
+            .origin
+            .as_deref()
+            .and_then(anano_core::external::repo_slug)
+            .unwrap_or_default();
+        let logins = if denied {
+            self.account_logins()
+        } else {
+            Vec::new()
+        };
         let theme = cx.theme();
         let (danger, warning, border) = (theme.danger, theme.warning, theme.border);
+        let error = error.map(|e| {
+            if denied {
+                if logins.is_empty() {
+                    tr!("repo.sync.denied_none", repo = slug.clone()).to_string()
+                } else {
+                    tr!("repo.sync.denied", repo = slug.clone()).to_string()
+                }
+            } else {
+                tr!("repo.sync.error", error = e).to_string()
+            }
+        });
         Some(
             v_flex()
                 .flex_none()
@@ -650,12 +689,26 @@ impl Workspace {
                         .gap_2()
                         .items_center()
                         .bg(danger.opacity(0.1))
-                        .child(div().flex_1().min_w_0().text_sm().text_color(danger).child(
-                            crate::ui::selectable(
-                                "notice-error",
-                                tr!("repo.sync.error", error = error),
-                            ),
-                        ))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_sm()
+                                .text_color(danger)
+                                .child(crate::ui::selectable("notice-error", error)),
+                        )
+                        .children(logins.into_iter().enumerate().map(|(ix, login)| {
+                            let name = login.clone();
+                            crate::ui::button(("notice-use-account", ix))
+                                .outline()
+                                .xsmall()
+                                .label(tr!("repo.sync.try_as", login = name))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_repo_account(login.clone(), cx);
+                                    this.dismiss_action_error(cx);
+                                    this.sync_now(cx);
+                                }))
+                        }))
                         .child(
                             crate::ui::button("notice-dismiss")
                                 .ghost()

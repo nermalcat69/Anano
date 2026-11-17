@@ -21,6 +21,40 @@ fn open(path: &Path) -> Result<git2::Repository, GitError> {
 
 /// 建立在 `pub(crate)` 上：`clone.rs` 里的克隆也要用同一套认证回调，不重复实现。
 pub(crate) fn auth_callbacks() -> RemoteCallbacks<'static> {
+    auth_callbacks_skipping(0)
+}
+
+/// GitHub answers a valid token without access to the repository with 403 (not 401), and
+/// libgit2 treats that as final instead of asking for other credentials. So the caller
+/// retries the whole operation with the next connected account: `skip` accounts are passed
+/// over before the first one is offered.
+fn is_forbidden(err: &git2::Error) -> bool {
+    err.class() == git2::ErrorClass::Http && err.message().contains("403")
+}
+
+/// Run `op` with each candidate account in turn while the server keeps answering 403.
+fn with_account_fallback<T>(
+    remote_url: Option<&str>,
+    mut op: impl FnMut(usize) -> Result<T, git2::Error>,
+) -> Result<T, git2::Error> {
+    let tries = remote_url
+        .filter(|u| crate::external::is_github_https(u))
+        .map_or(1, |u| {
+            crate::external::accounts_for(u, &crate::external::list_accounts())
+                .len()
+                .max(1)
+        });
+    let mut result = op(0);
+    for skip in 1..tries {
+        match &result {
+            Err(e) if is_forbidden(e) => result = op(skip),
+            _ => break,
+        }
+    }
+    result
+}
+
+fn auth_callbacks_skipping(skip: usize) -> RemoteCallbacks<'static> {
     let mut cb = RemoteCallbacks::new();
     let mut attempts = 0;
     cb.credentials(move |url, username_from_url, allowed| {
@@ -49,7 +83,7 @@ pub(crate) fn auth_callbacks() -> RemoteCallbacks<'static> {
             } else {
                 let accounts =
                     crate::external::accounts_for(url, &crate::external::list_accounts());
-                if let Some(account) = accounts.get(attempts - 1)
+                if let Some(account) = accounts.get(attempts - 1 + skip)
                     && let Some(token) = crate::external::token(&account.login)
                 {
                     return Cred::userpass_plaintext(&account.login, &token);
@@ -79,11 +113,13 @@ pub(crate) fn auth_callbacks() -> RemoteCallbacks<'static> {
 pub fn fetch(repo_path: &Path, remote_name: &str) -> Result<(), GitError> {
     let repo = open(repo_path)?;
     let mut remote = repo.find_remote(remote_name).map_err(GitError::Remote)?;
-    let mut opts = FetchOptions::new();
-    opts.remote_callbacks(auth_callbacks());
-    remote
-        .fetch(&[] as &[&str], Some(&mut opts), None)
-        .map_err(GitError::Remote)?;
+    let url = remote.url().map(str::to_string);
+    with_account_fallback(url.as_deref(), |skip| {
+        let mut opts = FetchOptions::new();
+        opts.remote_callbacks(auth_callbacks_skipping(skip));
+        remote.fetch(&[] as &[&str], Some(&mut opts), None)
+    })
+    .map_err(GitError::Remote)?;
     Ok(())
 }
 
@@ -153,21 +189,21 @@ pub fn push(repo_path: &Path, remote_name: &str, branch_name: &str) -> Result<()
     let mut remote = repo.find_remote(remote_name).map_err(GitError::Remote)?;
 
     let rejected: RefCell<Option<String>> = RefCell::new(None);
-    let mut cb = auth_callbacks();
-    cb.push_update_reference(|refname, status| {
-        if let Some(msg) = status {
-            *rejected.borrow_mut() = Some(format!("{refname}: {msg}"));
-        }
-        Ok(())
-    });
     let refspec = format!("refs/heads/{branch_name}:refs/heads/{branch_name}");
-    {
+    let url = remote.url().map(str::to_string);
+    with_account_fallback(url.as_deref(), |skip| {
+        let mut cb = auth_callbacks_skipping(skip);
+        cb.push_update_reference(|refname, status| {
+            if let Some(msg) = status {
+                *rejected.borrow_mut() = Some(format!("{refname}: {msg}"));
+            }
+            Ok(())
+        });
         let mut opts = PushOptions::new();
         opts.remote_callbacks(cb);
-        remote
-            .push(&[refspec.as_str()], Some(&mut opts))
-            .map_err(GitError::Remote)?;
-    }
+        remote.push(&[refspec.as_str()], Some(&mut opts))
+    })
+    .map_err(GitError::Remote)?;
 
     if let Some(msg) = rejected.into_inner() {
         return Err(GitError::Remote(git2::Error::from_str(&msg)));
