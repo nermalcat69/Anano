@@ -98,6 +98,26 @@ pub fn selectable(
     gpui_kit::base::SelectableText::new(id, text)
 }
 
+/// Tell the person something finished while they were looking elsewhere: a toast in the
+/// window, and (on macOS) a system notification in case Anano isn't in front.
+pub fn notify(window: &mut gpui_kit::Window, cx: &mut gpui_kit::App, text: gpui_kit::SharedString) {
+    use gpui_kit::component::WindowExt as _;
+    window.push_notification(
+        gpui_kit::component::notification::Notification::success(text.clone()),
+        cx,
+    );
+    #[cfg(target_os = "macos")]
+    {
+        let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
+        let _ = std::process::Command::new("osascript")
+            .args([
+                "-e",
+                &format!("display notification \"{escaped}\" with title \"Anano\""),
+            ])
+            .spawn();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

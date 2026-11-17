@@ -715,7 +715,61 @@ fn save_pull_cache(origin: &str, state: PullState, list: &[PullRequest], total: 
 /// while a fresh copy is fetched behind it. May be stale, never wrong about a pull
 /// request's existence.
 pub fn cached_pull_requests(origin: &str, state: PullState) -> Option<(Vec<PullRequest>, usize)> {
-    pulls_from_json(&std::fs::read_to_string(pull_cache_file(origin, state)?).ok()?)
+    pulls_from_json(&read_fresh(&pull_cache_file(origin, state)?)?)
+}
+
+/// How long a cached pull request page stays usable. Past it the cache is ignored (and
+/// then replaced by the next successful fetch).
+pub const PULL_CACHE_DAYS: u64 = 30;
+
+/// The file's text, unless it is missing or older than [`PULL_CACHE_DAYS`].
+fn read_fresh(file: &Path) -> Option<String> {
+    let age = std::fs::metadata(file)
+        .ok()?
+        .modified()
+        .ok()?
+        .elapsed()
+        .unwrap_or_default();
+    (age <= std::time::Duration::from_secs(PULL_CACHE_DAYS * 24 * 3600))
+        .then(|| std::fs::read_to_string(file).ok())?
+}
+
+fn pull_detail_file(origin: &str, number: u64) -> Option<PathBuf> {
+    let safe: String = repo_slug(origin)?
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Some(
+        cache_dir()?
+            .join("pull-details")
+            .join(format!("{safe}-{number}.json")),
+    )
+}
+
+/// A pull request opened before (within [`PULL_CACHE_DAYS`]): shown at once while the
+/// current version is fetched behind it.
+pub fn cached_pull_request(origin: &str, number: u64) -> Option<PullRequestDetail> {
+    let json: serde_json::Value =
+        serde_json::from_str(&read_fresh(&pull_detail_file(origin, number)?)?).ok()?;
+    parse_pull_request_detail(&json)
+}
+
+fn save_pull_detail(origin: &str, number: u64, raw: &str) {
+    if let Some(file) = pull_detail_file(origin, number)
+        && let Some(dir) = file.parent()
+        && std::fs::create_dir_all(dir).is_ok()
+    {
+        let part = file.with_extension("part");
+        if std::fs::write(&part, raw).is_ok() {
+            let _ = std::fs::rename(part, file);
+        }
+    }
 }
 
 fn authors_cache_file(origin: &str) -> Option<PathBuf> {
@@ -766,7 +820,7 @@ pub fn pull_authors(origin: &str) -> Result<Vec<String>, String> {
 
 /// The author list saved by the last visit (instant; may be stale).
 pub fn cached_pull_authors(origin: &str) -> Option<Vec<String>> {
-    let text = std::fs::read_to_string(authors_cache_file(origin)?).ok()?;
+    let text = read_fresh(&authors_cache_file(origin)?)?;
     Some(text.lines().map(str::to_string).collect())
 }
 
@@ -784,9 +838,12 @@ pub fn pull_request(origin: &str, number: u64) -> Result<PullRequestDetail, Stri
         "--json",
         &fields,
     ]);
-    let json: serde_json::Value =
-        serde_json::from_str(&gh_stdout(gh)?).map_err(|e| e.to_string())?;
-    parse_pull_request_detail(&json).ok_or_else(|| "GitHub returned no pull request".to_string())
+    let raw = gh_stdout(gh)?;
+    let json: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let detail = parse_pull_request_detail(&json)
+        .ok_or_else(|| "GitHub returned no pull request".to_string())?;
+    save_pull_detail(origin, number, &raw);
+    Ok(detail)
 }
 
 /// The whole pull request as a unified diff, already split into numbered files.
@@ -1221,6 +1278,26 @@ mod tests {
         );
         assert_eq!(pinned.len(), 1);
         assert_eq!(pinned[0].login, "arjunowo");
+    }
+
+    #[test]
+    fn cached_pull_pages_expire_after_thirty_days() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("x.json");
+        std::fs::write(&file, "{}").unwrap();
+        assert_eq!(read_fresh(&file).as_deref(), Some("{}"));
+        let age = |days: u64| {
+            let f = std::fs::File::options().write(true).open(&file).unwrap();
+            f.set_modified(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400 + 60),
+            )
+            .unwrap();
+        };
+        age(29);
+        assert!(read_fresh(&file).is_some());
+        age(31);
+        assert!(read_fresh(&file).is_none());
+        assert!(read_fresh(&dir.path().join("missing")).is_none());
     }
 
     #[test]

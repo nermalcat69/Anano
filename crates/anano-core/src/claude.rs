@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// What one step of a run looks like on screen.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ClaudeLine {
     /// Something Claude said.
     Text(String),
@@ -27,6 +27,53 @@ pub enum ClaudeLine {
         text: String,
         seconds: f64,
     },
+}
+
+/// One agent session as kept between runs of the app: what it was asked, where it ran and
+/// everything it said, so a repository's past sessions can be read again.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SessionRecord {
+    /// Unix milliseconds when it was created: unique, and orders sessions by recency.
+    pub id: u64,
+    pub title: String,
+    pub repo: PathBuf,
+    pub slug: Option<String>,
+    pub isolated: bool,
+    pub dir: PathBuf,
+    pub branch: Option<String>,
+    pub lines: Vec<ClaudeLine>,
+}
+
+fn sessions_file() -> Option<PathBuf> {
+    Some(
+        directories::ProjectDirs::from("", "", "Anano")?
+            .data_dir()
+            .join("agents.json"),
+    )
+}
+
+/// Every saved session (empty when there is no file or it can't be read).
+pub fn load_sessions() -> Vec<SessionRecord> {
+    sessions_file()
+        .and_then(|f| std::fs::read(f).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Replace the saved sessions. Written to a side file and renamed, so a crash mid-write
+/// can't leave half a history.
+pub fn save_sessions(sessions: &[SessionRecord]) {
+    let Some(file) = sessions_file() else { return };
+    let Ok(json) = serde_json::to_vec(sessions) else {
+        return;
+    };
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let part = file.with_extension("json.part");
+    if std::fs::write(&part, json).is_ok() {
+        let _ = std::fs::rename(&part, &file);
+    }
 }
 
 /// Where the `claude` CLI is: `$ANANO_CLAUDE` if set (for tests), then `PATH`, then the
@@ -195,6 +242,104 @@ pub fn spawn(
     system: Option<&str>,
     on_line: impl Fn(ClaudeLine) + Send + 'static,
 ) -> Result<ClaudeHandle, String> {
+    run(
+        dir,
+        prompt,
+        system,
+        "Bash(git:*) Bash(gh:*)",
+        "acceptEdits",
+        None,
+        on_line,
+    )
+}
+
+/// What Claude Code is asked when you press "Review with Claude" on a pull request.
+pub fn review_prompt(slug: &str, number: u64) -> String {
+    format!(
+        "Review pull request #{number} of {slug}. Read it with `gh pr view {number} --repo \
+         {slug}` and `gh pr diff {number} --repo {slug}`; if you need context, read files in \
+         the current directory. Do not change anything. Write a concise review in Markdown: \
+         one line saying what the change does, then the concrete problems you found (bugs, \
+         risks, missing tests or edge cases) most important first, each with the file and \
+         line, then whether it looks ready to merge. No preamble, and nothing about how you \
+         worked. Begin the answer with exactly one line, `VERDICT: APPROVE`, `VERDICT: \
+         REQUEST_CHANGES` or `VERDICT: COMMENT`, the review you would sign."
+    )
+}
+
+/// Split a review into the verdict Claude signed with (its first `VERDICT:` line) and the
+/// text to post. No recognisable verdict line: the whole text, and no verdict.
+pub fn parse_review(text: &str) -> (Option<crate::external::ReviewVerdict>, String) {
+    use crate::external::ReviewVerdict;
+    let trimmed = text.trim();
+    let (first, rest) = trimmed.split_once('\n').unwrap_or((trimmed, ""));
+    let verdict = first
+        .trim()
+        .trim_matches('*')
+        .strip_prefix("VERDICT:")
+        .map(|v| v.trim().trim_matches('*').to_ascii_uppercase())
+        .and_then(|v| match v.as_str() {
+            "APPROVE" | "APPROVED" => Some(ReviewVerdict::Approve),
+            "REQUEST_CHANGES" | "CHANGES_REQUESTED" => Some(ReviewVerdict::RequestChanges),
+            "COMMENT" => Some(ReviewVerdict::Comment),
+            _ => None,
+        });
+    match verdict {
+        Some(v) => (Some(v), rest.trim().to_string()),
+        None => (None, trimmed.to_string()),
+    }
+}
+
+/// "Claudify": read what people said on a pull request and, if another commit can fix it,
+/// make that commit on the pull request's own branch.
+pub fn claudify_prompt(slug: &str, number: u64) -> String {
+    format!(
+        "People have commented on or reviewed pull request #{number} of {slug}. Read it with \
+         `gh pr view {number} --repo {slug} --comments` and `gh pr diff {number} --repo \
+         {slug}`. Decide whether their feedback can be fixed with another commit. If it can: \
+         `gh pr checkout {number}` in this working copy, make the fixes, check that the \
+         result still builds or passes the project's tests if there is a quick way to run \
+         them, commit with a clear message, and `git push` to the pull request's branch \
+         (never force push, never merge). Finish by saying what you changed and which \
+         comments it answers. If it can't (the feedback needs a decision, is unclear, or is \
+         about something outside the code), change nothing and finish with a short \
+         explanation of what a person needs to decide."
+    )
+}
+
+/// Review a pull request, read-only: it can read the pull request and the files in `dir`,
+/// run `gh pr view` / `gh pr diff` and look at git history, and nothing else. Uses the
+/// repository's GitHub account for `gh`. The review arrives as the final [`ClaudeLine::Done`].
+pub fn review_pull_request(
+    origin: &str,
+    dir: &Path,
+    number: u64,
+    on_line: impl Fn(ClaudeLine) + Send + 'static,
+) -> Result<ClaudeHandle, String> {
+    let slug = crate::external::repo_slug(origin).ok_or("not a GitHub repository")?;
+    let token = crate::external::accounts_for(origin, &crate::external::list_accounts())
+        .first()
+        .and_then(|a| crate::external::token(&a.login));
+    run(
+        dir,
+        &review_prompt(&slug, number),
+        None,
+        "Read Grep Glob Bash(gh pr view:*) Bash(gh pr diff:*) Bash(git log:*) Bash(git show:*)",
+        "default",
+        token.map(|t| ("GH_TOKEN", t)),
+        on_line,
+    )
+}
+
+fn run(
+    dir: &Path,
+    prompt: &str,
+    system: Option<&str>,
+    tools: &str,
+    permission_mode: &str,
+    env: Option<(&str, String)>,
+    on_line: impl Fn(ClaudeLine) + Send + 'static,
+) -> Result<ClaudeHandle, String> {
     let claude = find_claude().ok_or("Claude Code (the `claude` command) isn't installed")?;
     let mut command = Command::new(claude);
     #[cfg(unix)]
@@ -207,9 +352,10 @@ pub fn spawn(
         .args([
             "--no-session-persistence",
             "--permission-mode",
-            "acceptEdits",
+            permission_mode,
         ])
-        .args(["--allowedTools", "Bash(git:*) Bash(gh:*)"])
+        .args(["--allowedTools", tools])
+        .envs(env)
         .args(
             system
                 .into_iter()
@@ -304,6 +450,64 @@ mod tests {
                 && prompt.contains("gh pr create")
         );
         let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn a_session_survives_being_saved_and_read_back() {
+        let record = SessionRecord {
+            id: 1_789_427_775_000,
+            title: "Add a logo".into(),
+            repo: PathBuf::from("/tmp/repo"),
+            slug: Some("me/repo".into()),
+            isolated: true,
+            dir: PathBuf::from("/tmp/agents/repo-claude-task-1"),
+            branch: Some("claude/task-1".into()),
+            lines: vec![
+                ClaudeLine::Text("Working".into()),
+                ClaudeLine::Tool {
+                    name: "Bash".into(),
+                    detail: "git status".into(),
+                },
+                ClaudeLine::Done {
+                    ok: true,
+                    text: "PR: https://x/1".into(),
+                    seconds: 12.0,
+                },
+            ],
+        };
+        let json = serde_json::to_vec(std::slice::from_ref(&record)).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Vec<SessionRecord>>(&json).unwrap(),
+            [record]
+        );
+    }
+
+    #[test]
+    fn a_reviews_first_line_is_its_verdict() {
+        use crate::external::ReviewVerdict::*;
+        assert_eq!(
+            parse_review("VERDICT: APPROVE\n\nLooks good."),
+            (Some(Approve), "Looks good.".into())
+        );
+        assert_eq!(
+            parse_review("**VERDICT: REQUEST_CHANGES**\nBug in a.rs:3"),
+            (Some(RequestChanges), "Bug in a.rs:3".into())
+        );
+        assert_eq!(
+            parse_review("verdict: nonsense\nx"),
+            (None, "verdict: nonsense\nx".into())
+        );
+        assert_eq!(
+            parse_review("No verdict here"),
+            (None, "No verdict here".into())
+        );
+        assert!(claudify_prompt("me/r", 5).contains("gh pr checkout 5"));
+    }
+
+    #[test]
+    fn the_review_prompt_names_the_pull_request_and_forbids_changes() {
+        let p = review_prompt("me/repo", 42);
+        assert!(p.contains("gh pr diff 42 --repo me/repo") && p.contains("Do not change anything"));
     }
 
     #[test]

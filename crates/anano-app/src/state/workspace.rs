@@ -89,7 +89,8 @@ pub struct Workspace {
     /// Every Claude Code agent started here (running, finished, or the prompt being written).
     pub(crate) claude: Vec<crate::ui::claude_dialog::ClaudeSession>,
     pub(crate) claude_active: usize,
-    pub(crate) claude_next_id: u64,
+    /// Claude reviews of pull requests, running or waiting for you (origin, number).
+    pub(crate) pr_claude: HashMap<(String, u64), crate::ui::review_dialog::PrClaude>,
     pub(crate) claude_input: Entity<TextareaState>,
     pub(crate) claude_scroll: ScrollHandle,
     /// The account view (repositories, organizations, commit history of an account's
@@ -207,9 +208,9 @@ impl Workspace {
                 .placeholder(tr!("repo.claude.prompt_placeholder"))
         });
         let mut ws = Self {
-            claude: Vec::new(),
+            claude: Self::load_claude_sessions(),
             claude_active: 0,
-            claude_next_id: 0,
+            pr_claude: HashMap::new(),
             claude_input: claude_input.clone(),
             claude_scroll: ScrollHandle::new(),
             account: None,

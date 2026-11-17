@@ -117,6 +117,9 @@ pub struct PullRequests {
     pub open: Option<u64>,
     pub detail: Option<Result<PullRequestDetail, String>>,
     pub merging: bool,
+    /// How many times in a row GitHub has answered "not worked out yet" for the open pull
+    /// request's mergeability (it computes that lazily, a moment after anything changes).
+    pub merge_checks: u8,
     /// What GitHub said when the last merge attempt was refused.
     pub merge_error: Option<String>,
 }
@@ -177,6 +180,19 @@ pub(crate) fn author_being_typed(raw: &str) -> Option<&str> {
         return None;
     }
     raw.split_whitespace().last().and_then(author_word)
+}
+
+/// How many times, two seconds apart, to ask again while GitHub is still working out
+/// whether a pull request can be merged, before giving up and saying so.
+const MERGE_CHECKS: u8 = 10;
+
+/// GitHub has not decided yet and we are still asking: the Merge button waits and spins
+/// instead of showing a dead end.
+pub(crate) fn merge_pending(pr: &PullRequestDetail, checks: u8) -> bool {
+    pr.summary.state == "OPEN"
+        && !pr.summary.draft
+        && pr.mergeable == "UNKNOWN"
+        && checks < MERGE_CHECKS
 }
 
 /// GitHub's merge verdict in words, and whether the Merge button should be live.
@@ -742,14 +758,23 @@ impl Workspace {
 
     /// Open one pull request (or refresh the one that's open).
     pub fn open_pull_request(&mut self, number: u64, cx: &mut Context<Self>) {
-        let (Some(origin), Some(pulls)) = (self.pulls_origin(), &mut self.pulls) else {
+        let Some(origin) = self.pulls_origin() else {
+            return;
+        };
+        let Some(pulls) = &mut self.pulls else {
             return;
         };
         if pulls.open != Some(number) {
             pulls.detail = None;
             pulls.merge_error = None;
+            pulls.merge_checks = 0;
+            // Opened before (within 30 days): show that at once, the fresh one replaces it.
+            pulls.detail = anano_core::external::cached_pull_request(&origin, number).map(Ok);
         }
         pulls.open = Some(number);
+        if pulls.detail.is_some() {
+            self.load_pr_pictures(cx);
+        }
         cx.notify();
         let task = crate::bridge::pull_request(cx, origin, number);
         cx.spawn(async move |ws, cx| {
@@ -761,6 +786,7 @@ impl Workspace {
                 {
                     pulls.detail = Some(detail);
                     ws.load_pr_pictures(cx);
+                    ws.recheck_mergeability(number, cx);
                     cx.notify();
                 }
             });
@@ -768,7 +794,57 @@ impl Workspace {
         .detach();
     }
 
+    /// GitHub answers "UNKNOWN" for whether a pull request can be merged until it has
+    /// worked it out. Ask again in two seconds (a few times) rather than leaving the
+    /// person to press refresh.
+    fn recheck_mergeability(&mut self, number: u64, cx: &mut Context<Self>) {
+        let Some(pulls) = &mut self.pulls else {
+            return;
+        };
+        let Some(Ok(pr)) = &pulls.detail else {
+            return;
+        };
+        if !merge_pending(pr, pulls.merge_checks) {
+            return;
+        }
+        pulls.merge_checks += 1;
+        cx.spawn(async move |ws, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
+            let _ = ws.update(cx, |ws, cx| {
+                if ws.pulls.as_ref().is_some_and(|p| p.open == Some(number)) {
+                    ws.open_pull_request(number, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Merging changes the repository on GitHub for everyone, so it is confirmed first.
+    /// "Claudify": an agent reads the comments and, if another commit can fix them, makes it
+    /// on the pull request's branch and pushes it, all in the background. It appears in
+    /// the Claude sessions list, and you are told when it is done.
+    fn claudify_pull_request(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(slug) = self
+            .pulls_origin()
+            .and_then(|o| anano_core::external::repo_slug(&o))
+        else {
+            return;
+        };
+        self.start_background_agent(
+            tr!("repo.claude.claudify_title", number = number.to_string()),
+            anano_core::claude::claudify_prompt(&slug, number),
+            window,
+            cx,
+        );
+        crate::ui::notify(
+            window,
+            cx,
+            tr!("repo.claude.claudify_started", number = number.to_string()),
+        );
+    }
+
     fn confirm_merge(
         &mut self,
         number: u64,
@@ -1084,7 +1160,65 @@ impl Workspace {
             (_, Some(Err(err))) => return note(err.clone().into(), danger),
             (_, Some(Ok(pr))) => pr,
         };
-        let (verdict, can_merge) = merge_verdict(pr);
+        let (mut verdict, can_merge) = merge_verdict(pr);
+        let checking = merge_pending(pr, pulls.merge_checks);
+        if checking {
+            verdict = tr!("repo.pulls.verdict.checking");
+        }
+        let merged = pr.summary.state == "MERGED";
+        // When people have commented or reviewed, Claude Code can answer them in the
+        // background: fix what they asked in another commit ("Claudify"), or read the
+        // pull request and sign a review ("Claude sign-off") to submit or drop.
+        let number = pr.summary.number;
+        let discussed = pr
+            .events
+            .iter()
+            .any(|e| e.kind != anano_core::external::PrEventKind::Commit);
+        let claude_ready = self.claude_review_ready(number);
+        let claude_reviewing = self.claude_review_running(number);
+        let logo = || {
+            gpui_kit::component::Icon::empty()
+                .path(crate::assets::ICON_CLAUDE)
+                .text_color(gpui_kit::rgb(0xD97757))
+        };
+        let claude_buttons: Vec<AnyElement> = if discussed {
+            vec![
+                crate::ui::button("pull-claudify")
+                    .outline()
+                    .icon(logo())
+                    .label(tr!("repo.claude.claudify"))
+                    .tooltip(tr!("repo.claude.claudify_tip"))
+                    .disabled(pulls.remote.is_some())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.claudify_pull_request(number, window, cx)
+                    }))
+                    .into_any_element(),
+                crate::ui::button("pull-claude-sign")
+                    .outline()
+                    .icon(logo())
+                    .label(if claude_ready {
+                        tr!("repo.claude.sign_ready")
+                    } else if claude_reviewing {
+                        tr!("repo.claude.signing")
+                    } else {
+                        tr!("repo.claude.sign")
+                    })
+                    .tooltip(tr!("repo.claude.sign_tip"))
+                    .loading(claude_reviewing)
+                    .disabled(claude_reviewing)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if this.claude_review_ready(number) {
+                            this.open_review_dialog(window, cx)
+                        } else {
+                            this.start_claude_review(number, window, cx)
+                        }
+                    }))
+                    .into_any_element(),
+            ]
+        } else {
+            Vec::new()
+        };
+        let (success, on_success) = (cx.theme().success, gpui_kit::white());
         let section = |title: SharedString| {
             div()
                 .text_sm()
@@ -1215,10 +1349,13 @@ impl Workspace {
                     .p_3()
                     .rounded(px(8.))
                     .border_1()
-                    .border_color(border)
+                    .border_color(if merged { success } else { border })
+                    // "This pull request has been merged.": green, with white text.
+                    .when(merged, |b| b.bg(success).text_color(on_success))
                     .child(
                         div()
                             .text_sm()
+                            .when(merged, |d| d.font_weight(FontWeight::SEMIBOLD))
                             .child(crate::ui::selectable("pull-verdict", verdict)),
                     )
                     // A pull request of the open repository that conflicts with its base:
@@ -1255,16 +1392,26 @@ impl Workspace {
                     }))
                     .when(pr.summary.state == "OPEN", |merge_box| {
                         merge_box.child(
-                            h_flex().debug_selector(|| "pull-merge".into()).child(
-                                crate::ui::button("pull-merge")
-                                    .primary()
-                                    .label(tr!("repo.pulls.merge"))
-                                    .loading(pulls.merging)
-                                    .disabled(!can_merge || pulls.merging)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.confirm_merge(number, title.clone(), window, cx)
-                                    })),
-                            ),
+                            h_flex()
+                                .gap_2()
+                                .debug_selector(|| "pull-merge".into())
+                                .child(
+                                    crate::ui::button("pull-merge")
+                                        .primary()
+                                        .label(if pulls.merging {
+                                            tr!("repo.pulls.merging")
+                                        } else if checking {
+                                            tr!("repo.pulls.checking")
+                                        } else {
+                                            tr!("repo.pulls.merge")
+                                        })
+                                        .loading(pulls.merging || checking)
+                                        .disabled(!can_merge || pulls.merging || checking)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.confirm_merge(number, title.clone(), window, cx)
+                                        })),
+                                )
+                                .children(claude_buttons),
                         )
                     }),
             );
@@ -1441,6 +1588,16 @@ mod tests {
         assert!(!can("OPEN", false, "MERGEABLE", "BEHIND"));
         assert!(!can("OPEN", true, "MERGEABLE", "CLEAN"));
         assert!(!can("OPEN", false, "UNKNOWN", "UNKNOWN"));
+        // While GitHub is still working it out the button waits; after enough tries it stops.
+        let unknown = pr("OPEN", false, "UNKNOWN", "UNKNOWN");
+        assert!(merge_pending(&unknown, 0) && merge_pending(&unknown, MERGE_CHECKS - 1));
+        assert!(!merge_pending(&unknown, MERGE_CHECKS));
+        assert!(!merge_pending(&pr("OPEN", false, "MERGEABLE", "CLEAN"), 0));
+        assert!(!merge_pending(
+            &pr("MERGED", false, "UNKNOWN", "UNKNOWN"),
+            0
+        ));
+        assert!(!merge_pending(&pr("OPEN", true, "UNKNOWN", "UNKNOWN"), 0));
         assert!(!can("MERGED", false, "MERGEABLE", "CLEAN"));
         assert!(!can("CLOSED", false, "MERGEABLE", "CLEAN"));
     }
