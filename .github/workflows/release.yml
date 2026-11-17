@@ -395,7 +395,8 @@ jobs:
   mirror-to-oss:
     name: Mirror to Aliyun OSS
     needs: [publish]
-    if: ${{ !contains(github.ref_name, '-') }}
+    # 镜像桶与域名是上游 fork 的；只有仓库变量 OSS_MIRROR=true（并配好 OSS secrets 与下面的桶/域名）才跑
+    if: ${{ vars.OSS_MIRROR == 'true' && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     environment: prod
     env:

@@ -29,10 +29,10 @@ pub const AUTHOR: &str = "Arjun Aditya";
 /// **必须是纯 ASCII**：`.rc` 由 `rc.exe` 按系统 ANSI 代码页解析、MSI 的摘要信息流同样
 /// 受代码页限制，中文在那两处会变成乱码。展示用的中文署名见 [`AUTHOR`]。
 #[allow(dead_code)]
-pub const PUBLISHER: &str = "finch-xu";
+pub const PUBLISHER: &str = "nermalcat69";
 
 /// 项目主页；「关于」页的链接指向这里（发布页在 `update::RELEASES_URL`）。
-pub const REPO_URL: &str = "https://github.com/finch-xu/Anano";
+pub const REPO_URL: &str = "https://github.com/nermalcat69/Anano";
 
 /// 开源协议，与仓库根的 `LICENSE` 一致。
 pub const LICENSE: &str = "MIT";

@@ -25,7 +25,7 @@
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
 
   <Package Name="Anano"
-           Manufacturer="finch-xu"
+           Manufacturer="nermalcat69"
            Version="$(var.Version)"
            UpgradeCode="26F860EC-5F02-4840-B181-8AAB10D49A6E"
            Scope="perUser"
@@ -49,7 +49,7 @@
     <!-- 「应用和功能」列表里的图标与链接 -->
     <Icon Id="AnanoIcon" SourceFile="$(var.IconFile)" />
     <Property Id="ARPPRODUCTICON" Value="AnanoIcon" />
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/finch-xu/Anano" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/nermalcat69/Anano" />
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="ProgramsFolder" Name="Programs">
