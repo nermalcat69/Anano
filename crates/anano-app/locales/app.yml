@@ -955,6 +955,10 @@ repo:
       en: "%{author} wants to merge %{head} into %{base}"
     merge:
       en: Merge pull request
+    merging:
+      en: Merging pull request…
+    checking:
+      en: Checking if it can be merged…
     merge_title:
       en: "Merge pull request #%{number}?"
     state:
@@ -992,6 +996,8 @@ repo:
         en: "This branch can be merged, but some checks have not passed."
       clean:
         en: "This branch has no conflicts with the base branch and can be merged."
+      checking:
+        en: Checking whether this can be merged…
       unknown:
         en: "GitHub hasn't worked out yet whether this can be merged. Refresh in a moment."
   workflows:
@@ -1168,6 +1174,34 @@ repo:
       en: Starts on a new branch in its own working copy (your checkout isn't touched) and opens a pull request
     new_agent:
       en: "+ New agent"
+    claudify:
+      en: Claudify
+    claudify_tip:
+      en: Claude Code reads the comments and, if another commit can fix them, makes it on this pull request's branch and pushes it. Runs in the background.
+    claudify_title:
+      en: "Claudify PR #%{number}"
+    claudify_started:
+      en: "Claude is working on the comments of PR #%{number} in the background."
+    sign:
+      en: Claude sign-off
+    signing:
+      en: Claude is reviewing…
+    sign_ready:
+      en: Claude's review is ready
+    sign_tip:
+      en: Claude Code reads the pull request in the background and signs a review (verdict and reasons). Nothing is posted until you submit it.
+    review_ready:
+      en: "Claude finished reviewing PR #%{number}. Open Review to read it and submit."
+    agent_done:
+      en: "Claude finished: %{title}"
+    review_button:
+      en: Review with Claude
+    reviewing:
+      en: Reviewing changes…
+    draft:
+      en: Not started
+    clear_finished:
+      en: Clear finished
     keeps_running:
       en: Closing this keeps the agent running.
     dialog_title:

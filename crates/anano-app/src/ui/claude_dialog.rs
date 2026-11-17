@@ -25,8 +25,9 @@ use gpui_kit::{
 use crate::i18n::tr;
 use crate::state::workspace::Workspace;
 
-const DIALOG_WIDTH: f32 = 820.;
-const LOG_HEIGHT: f32 = 380.;
+const DIALOG_WIDTH: f32 = 1120.;
+const SIDEBAR_WIDTH: f32 = 250.;
+const LOG_HEIGHT: f32 = 470.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaudePhase {
@@ -181,7 +182,19 @@ fn line_row(ix: usize, line: &ClaudeLine, cx: &App) -> AnyElement {
 /// selected agent's prompt (before it runs) or its log.
 fn claude_body(workspace: &Entity<Workspace>, cx: &mut App) -> AnyElement {
     let ws = workspace.read(cx);
-    let Some(session) = ws.claude.get(ws.claude_active) else {
+    // This repository's sessions, newest first. The selected one, if it belongs to
+    // another repository, gives way to this one's newest.
+    let repo_path = ws.active_repo().map(|r| r.entry.path.clone());
+    let mut mine: Vec<usize> = (0..ws.claude.len())
+        .filter(|&i| Some(&ws.claude[i].repo) == repo_path.as_ref())
+        .collect();
+    mine.sort_by_key(|&i| std::cmp::Reverse(ws.claude[i].id));
+    let shown = if mine.contains(&ws.claude_active) {
+        Some(ws.claude_active)
+    } else {
+        mine.first().copied()
+    };
+    let Some(session) = shown.and_then(|i| ws.claude.get(i)) else {
         return div().into_any_element();
     };
     let (phase, error, id) = (session.phase, session.error.clone(), session.id);
@@ -194,12 +207,21 @@ fn claude_body(workspace: &Entity<Workspace>, cx: &mut App) -> AnyElement {
             path = session.dir.display().to_string()
         ),
     };
-    let tabs: Vec<(u64, SharedString, ClaudePhase, bool)> = ws
-        .claude
+    let tabs: Vec<(u64, SharedString, ClaudePhase, SharedString, bool)> = mine
         .iter()
-        .enumerate()
-        .map(|(ix, s)| (s.id, s.title.clone(), s.phase, ix == ws.claude_active))
+        .map(|&i| {
+            let s = &ws.claude[i];
+            let what = match (&s.branch, s.phase) {
+                (_, ClaudePhase::Ready) => tr!("repo.claude.draft"),
+                (Some(branch), _) => branch.clone().into(),
+                _ => crate::ui::time_ago((s.id / 1000) as i64),
+            };
+            (s.id, s.title.clone(), s.phase, what, Some(i) == shown)
+        })
         .collect();
+    let finished_any = mine
+        .iter()
+        .any(|&i| ws.claude[i].phase == ClaudePhase::Finished);
     let installed = anano_core::claude::find_claude().is_some();
     let (input, scroll) = (ws.claude_input.clone(), ws.claude_scroll.clone());
     let theme = cx.theme();
@@ -211,43 +233,84 @@ fn claude_body(workspace: &Entity<Workspace>, cx: &mut App) -> AnyElement {
         theme.success,
     );
 
-    let tab_row = h_flex()
-        .gap_1()
-        .flex_wrap()
-        .children(tabs.into_iter().map(|(tab_id, title, phase, selected)| {
-            let ws_tab = workspace.clone();
-            let dot = match phase {
-                ClaudePhase::Running => theme.warning,
-                ClaudePhase::Finished => success,
-                ClaudePhase::Ready => muted,
-            };
-            h_flex()
-                .id(("claude-tab", tab_id as usize))
-                .gap_1p5()
-                .items_center()
-                .px_2()
-                .py_1()
-                .max_w(px(220.))
-                .rounded(px(6.))
-                .border_1()
-                .border_color(border)
-                .cursor_pointer()
-                .when(selected, |t| t.bg(active))
-                .child(div().flex_none().size(px(8.)).rounded_full().bg(dot))
-                .child(div().min_w_0().truncate().text_xs().child(title))
-                .on_click(move |_, window, cx| {
-                    ws_tab.update(cx, |ws, cx| ws.select_claude_tab(tab_id, window, cx))
-                })
-        }))
-        .child({
-            let ws_new = workspace.clone();
+    let ws_new = workspace.clone();
+    let ws_clear = workspace.clone();
+    let sidebar = v_flex()
+        .flex_none()
+        .w(px(SIDEBAR_WIDTH))
+        .h_full()
+        .gap_2()
+        .pr_3()
+        .border_r_1()
+        .border_color(border)
+        .child(
             crate::ui::button("claude-new-agent")
-                .ghost()
-                .xsmall()
+                .outline()
+                .small()
+                .w_full()
                 .label(tr!("repo.claude.new_agent"))
                 .on_click(move |_, window, cx| {
                     ws_new.update(cx, |ws, cx| ws.new_claude_agent(window, cx))
-                })
+                }),
+        )
+        .child(
+            v_flex()
+                .id("claude-sessions")
+                .flex_1()
+                .min_h_0()
+                .gap_1()
+                .overflow_y_scroll()
+                .children(
+                    tabs.into_iter()
+                        .map(|(tab_id, title, phase, what, selected)| {
+                            let ws_tab = workspace.clone();
+                            let dot = match phase {
+                                ClaudePhase::Running => theme.warning,
+                                ClaudePhase::Finished => success,
+                                ClaudePhase::Ready => muted,
+                            };
+                            h_flex()
+                                .id(("claude-tab", tab_id as usize))
+                                .gap_2()
+                                .px_2()
+                                .py_1p5()
+                                .items_start()
+                                .rounded(px(6.))
+                                .cursor_pointer()
+                                .when(selected, |t| t.bg(active))
+                                .hover(|t| t.bg(active.opacity(0.6)))
+                                .child(div().flex_none().mt_1().size(px(8.)).rounded_full().bg(dot))
+                                .child(
+                                    v_flex()
+                                        .min_w_0()
+                                        .child(div().truncate().text_sm().child(title))
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_xs()
+                                                .text_color(muted)
+                                                .child(what),
+                                        ),
+                                )
+                                .on_click(move |_, window, cx| {
+                                    ws_tab.update(cx, |ws, cx| {
+                                        ws.select_claude_tab(tab_id, window, cx)
+                                    })
+                                })
+                        }),
+                ),
+        )
+        .when(finished_any, |v| {
+            v.child(
+                crate::ui::button("claude-clear")
+                    .ghost()
+                    .xsmall()
+                    .w_full()
+                    .label(tr!("repo.claude.clear_finished"))
+                    .on_click(move |_, window, cx| {
+                        ws_clear.update(cx, |ws, cx| ws.clear_finished_claude(window, cx))
+                    }),
+            )
         });
     let place = div().text_xs().text_color(muted).child(place);
     let ws_run = workspace.clone();
@@ -339,22 +402,98 @@ fn claude_body(workspace: &Entity<Workspace>, cx: &mut App) -> AnyElement {
                     }),
             )
         });
-    v_flex()
-        .gap_3()
-        .py_1()
-        .child(tab_row)
-        .child(place)
-        .child(main)
-        .child(buttons)
+    h_flex()
+        .gap_4()
+        .items_start()
+        .child(sidebar.h(px(LOG_HEIGHT + 130.)))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_3()
+                .child(place)
+                .child(main)
+                .child(buttons),
+        )
         .into_any_element()
 }
 
 impl Workspace {
     /// The one agent whose prompt is still being written, if any.
     fn claude_draft(&self) -> Option<usize> {
+        let repo = self.active_repo().map(|r| &r.entry.path)?;
         self.claude
             .iter()
-            .position(|s| s.phase == ClaudePhase::Ready)
+            .position(|s| s.phase == ClaudePhase::Ready && &s.repo == repo)
+    }
+
+    /// Save every session that has been run (drafts are not history).
+    pub(crate) fn save_claude_sessions(&self) {
+        let records: Vec<_> = self
+            .claude
+            .iter()
+            .filter(|s| s.phase != ClaudePhase::Ready)
+            .map(|s| anano_core::claude::SessionRecord {
+                id: s.id,
+                title: s.title.to_string(),
+                repo: s.repo.clone(),
+                slug: s.slug.clone(),
+                isolated: s.isolated,
+                dir: s.dir.clone(),
+                branch: s.branch.clone(),
+                lines: s.lines.clone(),
+            })
+            .collect();
+        anano_core::claude::save_sessions(&records);
+    }
+
+    /// The saved sessions as they were left. One that was still running when the app closed
+    /// is over: its process went with it.
+    pub(crate) fn load_claude_sessions() -> Vec<ClaudeSession> {
+        anano_core::claude::load_sessions()
+            .into_iter()
+            .map(|r| {
+                let mut lines = r.lines;
+                if !matches!(lines.last(), Some(ClaudeLine::Done { .. })) {
+                    lines.push(ClaudeLine::Done {
+                        ok: false,
+                        text: "Anano was closed before this finished.".into(),
+                        seconds: 0.0,
+                    });
+                }
+                ClaudeSession {
+                    id: r.id,
+                    title: r.title.into(),
+                    repo: r.repo,
+                    slug: r.slug,
+                    isolated: r.isolated,
+                    dir: r.dir,
+                    branch: r.branch,
+                    phase: ClaudePhase::Finished,
+                    lines,
+                    handle: None,
+                    error: None,
+                }
+            })
+            .collect()
+    }
+
+    fn next_claude_id(&self) -> u64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        self.claude.iter().map(|s| s.id + 1).fold(now, u64::max)
+    }
+
+    /// "Clear finished": forget this repository's finished sessions.
+    pub fn clear_finished_claude(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let repo = self.active_repo().map(|r| r.entry.path.clone());
+        self.claude
+            .retain(|s| s.phase != ClaudePhase::Finished || Some(&s.repo) != repo.as_ref());
+        self.claude_active = 0;
+        self.save_claude_sessions();
+        window.refresh();
+        cx.notify();
     }
 
     /// Show the dialog with a prompt ready to run (replacing a draft not yet run; agents
@@ -367,8 +506,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(repo) = self.active_repo() else {
+        if !self.prepare_claude_draft(title, isolated) {
             return;
+        }
+        self.claude_input
+            .update(cx, |input, cx| input.set_value(prompt, window, cx));
+        self.open_claude_window(window, cx);
+    }
+
+    /// Make (or reuse) this repository's draft session. `false` when no repository is open.
+    fn prepare_claude_draft(&mut self, title: SharedString, isolated: bool) -> bool {
+        let Some(repo) = self.active_repo() else {
+            return false;
         };
         let (dir, slug) = (
             repo.entry.path.clone(),
@@ -379,9 +528,9 @@ impl Workspace {
         let ix = match self.claude_draft() {
             Some(ix) => ix,
             None => {
-                self.claude_next_id += 1;
+                let id = self.next_claude_id();
                 self.claude.push(ClaudeSession {
-                    id: self.claude_next_id,
+                    id,
                     title: SharedString::default(),
                     repo: dir.clone(),
                     slug: slug.clone(),
@@ -406,9 +555,21 @@ impl Workspace {
         ) = (title, isolated, dir.clone(), slug, dir);
         session.error = None;
         self.claude_active = ix;
-        self.claude_input
-            .update(cx, |input, cx| input.set_value(prompt, window, cx));
-        self.open_claude_window(window, cx);
+        true
+    }
+
+    /// Start an agent right away, with no dialog: it runs in the background in its own
+    /// branch and working copy, shows up in the sessions list, and says so when it is done.
+    pub fn start_background_agent(
+        &mut self,
+        title: SharedString,
+        prompt: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.prepare_claude_draft(title, true) {
+            self.run_claude_with(prompt, window, cx);
+        }
     }
 
     /// Open the dialog itself (once); it follows `self.claude` from then on.
@@ -487,7 +648,12 @@ impl Workspace {
     /// isolated agent first gets its own branch and working copy.
     pub fn run_claude(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let prompt = self.claude_input.read(cx).value().trim().to_string();
-        let Some(session) = self.claude.get_mut(self.claude_active) else {
+        self.run_claude_with(prompt, window, cx);
+    }
+
+    fn run_claude_with(&mut self, prompt: String, window: &mut Window, cx: &mut Context<Self>) {
+        // Only a draft runs, and a repository has at most one: the one on screen.
+        let Some(session) = self.claude_draft().and_then(|ix| self.claude.get_mut(ix)) else {
             return;
         };
         if prompt.is_empty() || session.phase != ClaudePhase::Ready {
@@ -520,6 +686,7 @@ impl Workspace {
                 "Creating branch {branch} in its own working copy…"
             )));
         }
+        self.save_claude_sessions();
         window.refresh();
         cx.notify();
         let make = isolated.then(|| {
@@ -616,6 +783,17 @@ impl Workspace {
             self.refresh_active_status(cx);
             self.refresh_active_log(cx);
             self.refresh_active_branches(cx);
+            self.save_claude_sessions();
+            // Finished while you were elsewhere (the dialog is closed): say so.
+            if !window.has_active_dialog(cx)
+                && let Some(s) = self.claude.iter().find(|s| s.id == id)
+            {
+                crate::ui::notify(
+                    window,
+                    cx,
+                    tr!("repo.claude.agent_done", title = s.title.to_string()),
+                );
+            }
         }
         self.claude_scroll.scroll_to_bottom();
         window.refresh();

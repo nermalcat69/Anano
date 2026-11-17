@@ -21,6 +21,8 @@ use gpui_kit::{
     px, uniform_list,
 };
 
+use gpui_kit::AppContext as _;
+
 use crate::bridge;
 use crate::i18n::tr;
 use crate::state::workspace::Workspace;
@@ -31,6 +33,14 @@ const CONTENT_HEIGHT: f32 = 560.;
 const FILES_WIDTH: f32 = 260.;
 const ROW_HEIGHT: f32 = 20.;
 const GUTTER_WIDTH: f32 = 44.;
+
+/// Claude Code's background review of one pull request.
+pub enum PrClaude {
+    Running,
+    /// Its verdict (if it signed one) and review text, or why it failed. Kept until the
+    /// review dialog is opened and takes it.
+    Ready(Result<(Option<ReviewVerdict>, String), String>),
+}
 
 /// What the dialog is showing. `files` is `None` while the diff is being fetched.
 pub struct ReviewState {
@@ -220,6 +230,7 @@ fn review_body(workspace: &Entity<Workspace>, cx: &mut App) -> AnyElement {
     };
     let (files, selected, split) = (review.files.clone(), review.selected, review.split);
     let (form_open, verdict, submitting) = (review.form_open, review.verdict, review.submitting);
+    let claude_running = ws.claude_review_running(review.number);
     let error = review.error.clone();
     let message_empty = ws.review_input.read(cx).value().trim().is_empty();
     let (input, scroll) = (ws.review_input.clone(), ws.review_scroll.clone());
@@ -459,13 +470,33 @@ fn review_body(workspace: &Entity<Workspace>, cx: &mut App) -> AnyElement {
 
     // ---- the bar at the bottom
     let toggle_ws = workspace.clone();
+    let claude_ws = workspace.clone();
     let bar = h_flex()
         .flex_none()
         .gap_2()
         .p_3()
-        .justify_end()
         .border_t_1()
         .border_color(border)
+        .child(
+            crate::ui::button("review-claude")
+                .outline()
+                .icon(
+                    gpui_kit::component::Icon::empty()
+                        .path(crate::assets::ICON_CLAUDE)
+                        .text_color(gpui_kit::rgb(0xD97757)),
+                )
+                .label(if claude_running {
+                    tr!("repo.claude.reviewing")
+                } else {
+                    tr!("repo.claude.review_button")
+                })
+                .loading(claude_running)
+                .disabled(claude_running)
+                .on_click(move |_, window, cx| {
+                    claude_ws.update(cx, |ws, cx| ws.review_with_claude(window, cx))
+                }),
+        )
+        .child(div().flex_1())
         .child(
             crate::ui::button("review-close")
                 .outline()
@@ -532,6 +563,8 @@ impl Workspace {
         })
         .detach();
         self.show_review_dialog(number, window, cx);
+        // Claude finished reviewing this one while the dialog was closed: it is waiting.
+        self.apply_claude_review(window, cx);
     }
 
     /// The dialog itself; its content is `review_body`, read from the review state.
@@ -625,6 +658,145 @@ impl Workspace {
         .detach();
     }
 
+    fn claude_key(&self, number: u64) -> Option<(String, u64)> {
+        Some((self.pulls_origin()?, number))
+    }
+
+    pub(crate) fn claude_review_running(&self, number: u64) -> bool {
+        self.claude_key(number)
+            .is_some_and(|k| matches!(self.pr_claude.get(&k), Some(PrClaude::Running)))
+    }
+
+    pub(crate) fn claude_review_ready(&self, number: u64) -> bool {
+        self.claude_key(number)
+            .is_some_and(|k| matches!(self.pr_claude.get(&k), Some(PrClaude::Ready(_))))
+    }
+
+    /// The review dialog's "Review with Claude".
+    pub fn review_with_claude(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(number) = self
+            .pulls
+            .as_ref()
+            .and_then(|p| p.review.as_ref())
+            .map(|r| r.number)
+        {
+            self.start_claude_review(number, window, cx);
+        }
+    }
+
+    /// Claude Code reads the pull request in the background and signs a review (a verdict
+    /// and its reasons). Nothing waits on it: whether the dialog is open, closed, or another
+    /// pull request is showing, the result is kept, and you are told when it is ready. It
+    /// never posts anything: the review is put in front of you to submit, edit or drop.
+    pub fn start_claude_review(
+        &mut self,
+        number: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use anano_core::claude::ClaudeLine;
+        let (Some(origin), Some(key)) = (self.pulls_origin(), self.claude_key(number)) else {
+            return;
+        };
+        if self.claude_review_running(number) {
+            return;
+        }
+        // In the open repository's folder when that is the one reviewed, so Claude can read
+        // surrounding files; otherwise somewhere neutral.
+        let remote = self.pulls.as_ref().is_some_and(|p| p.remote.is_some());
+        let dir = if remote {
+            None
+        } else {
+            self.active_repo().map(|r| r.entry.path.clone())
+        }
+        .unwrap_or_else(std::env::temp_dir);
+        self.pr_claude.insert(key.clone(), PrClaude::Running);
+        if let Some(review) = self.review_mut() {
+            review.error = None;
+        }
+        window.refresh();
+        cx.notify();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ClaudeLine>();
+        let started = cx.background_spawn(async move {
+            anano_core::claude::review_pull_request(&origin, &dir, number, move |line| {
+                let _ = tx.send(line);
+            })
+        });
+        cx.spawn_in(window, async move |ws, cx| {
+            let outcome = match started.await {
+                Err(err) => Err(err),
+                Ok(_handle) => loop {
+                    match rx.recv().await {
+                        Some(ClaudeLine::Done { ok: true, text, .. }) => {
+                            break Ok(anano_core::claude::parse_review(&text));
+                        }
+                        Some(ClaudeLine::Done { text, .. }) => break Err(text),
+                        Some(_) => {}
+                        None => break Err("Claude Code stopped.".to_string()),
+                    }
+                },
+            };
+            let _ = ws.update_in(cx, |ws, window, cx| {
+                ws.pr_claude.insert(key, PrClaude::Ready(outcome));
+                let dialog_open = ws
+                    .pulls
+                    .as_ref()
+                    .and_then(|p| p.review.as_ref())
+                    .is_some_and(|r| r.number == number);
+                if dialog_open && window.has_active_dialog(cx) {
+                    ws.apply_claude_review(window, cx);
+                } else {
+                    // Nobody is looking at the review: say it is ready.
+                    crate::ui::notify(
+                        window,
+                        cx,
+                        tr!("repo.claude.review_ready", number = number.to_string()),
+                    );
+                }
+                window.refresh();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Put a finished Claude review into the open dialog: its text in the message box, its
+    /// verdict selected, the form open. The dialog is where it is read, edited and posted.
+    pub fn apply_claude_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(number) = self
+            .pulls
+            .as_ref()
+            .and_then(|p| p.review.as_ref())
+            .map(|r| r.number)
+        else {
+            return;
+        };
+        let Some(key) = self.claude_key(number) else {
+            return;
+        };
+        let Some(PrClaude::Ready(outcome)) = self.pr_claude.remove(&key) else {
+            return;
+        };
+        match outcome {
+            Ok((verdict, text)) => {
+                self.review_input
+                    .update(cx, |input, cx| input.set_value(text, window, cx));
+                if let Some(r) = self.review_mut() {
+                    r.verdict = verdict.unwrap_or(ReviewVerdict::Comment);
+                    r.form_open = true;
+                }
+            }
+            Err(err) => {
+                if let Some(r) = self.review_mut() {
+                    r.form_open = true;
+                    r.error = Some(err);
+                }
+            }
+        }
+        window.refresh();
+        cx.notify();
+    }
+
     /// Typing in the review message must re-enable / disable Submit.
     pub(crate) fn on_review_input_event(&mut self, event: &InputEvent, cx: &mut Context<Self>) {
         if matches!(event, InputEvent::Change) {
@@ -637,7 +809,6 @@ impl Workspace {
 mod tests {
     use super::*;
     use crate::ui::pull_requests::PullRequests;
-    use gpui_kit::AppContext as _;
 
     fn line(kind: LineKind, old: Option<u32>, new: Option<u32>, text: &str) -> DiffLine {
         DiffLine {
