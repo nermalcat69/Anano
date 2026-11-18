@@ -30,3 +30,5 @@ xattr -cr /Applications/Anano.app
 
 Alternatively, right-click the app → **Open**, or go to System Settings → Privacy & Security
 → **Open Anyway**.
+
+This project is for arjun's personal usecase considering as of 2026, not everyone prefers using this.
