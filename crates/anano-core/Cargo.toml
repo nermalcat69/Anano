@@ -16,5 +16,9 @@ ulid.workspace = true
 git2.workspace = true
 notify.workspace = true
 
+# macOS CI cross-compiles x86_64 on an arm64 runner, where the system OpenSSL is the wrong arch.
+[target.'cfg(target_os = "macos")'.dependencies]
+git2 = { workspace = true, features = ["vendored-openssl"] }
+
 [dev-dependencies]
 tempfile.workspace = true
