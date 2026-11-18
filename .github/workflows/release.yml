@@ -127,51 +127,15 @@ jobs:
         with:
           key: macos-${{ matrix.label }}
 
-      - name: Verify signing & notarization secrets are present
-        shell: bash
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          missing=0
-          for var in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
-                     APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-            if [ -z "${!var:-}" ]; then
-              echo "::error::$var secret 为空 — 签名 / 公证会失败。到 Settings > Environments > prod 配置。"
-              missing=1
-            fi
-          done
-          [ "$missing" -eq 0 ] || exit 1
-          echo "6 个签名 / 公证 secrets 齐全。"
-
-      - name: Import signing certificate
-        shell: bash
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: scripts/ci/macos-keychain.sh import
-
-      - name: Build, sign & notarize
+      # Unsigned build: ad-hoc codesign only, no notarization (this fork has no Apple Developer
+      # account). Users clear the quarantine flag once: xattr -cr /Applications/Anano.app
+      - name: Build (ad-hoc signed, not notarized)
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
           ARCH_LABEL: ${{ matrix.label }}
-          NOTARIZE: '1'
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARIZE: '0'
         run: scripts/bundle-macos.sh
-
-      - name: Remove signing keychain
-        if: always()
-        shell: bash
-        run: scripts/ci/macos-keychain.sh cleanup
 
       - name: Inspect bundle (diagnostic)
         if: always()
